@@ -247,6 +247,74 @@ func TestParseClient_ProviderUnknown(t *testing.T) {
 	}
 }
 
+// -provider hub: креды приходят готовыми, поэтому VK-обязательные флаги не
+// требуются, но эндпоинт должен быть описан целиком (URL + пин + токен).
+func validHubArgs() []string {
+	return []string{
+		"-peer", "1.2.3.4:5000",
+		"-provider", "hub",
+		"-hub-url", "https://1.2.3.4:8444/turn-creds",
+		"-hub-pin", "5K9wq22910YgOPZvebUlIcvPVZ/aO/nRT656abl201Q=",
+	}
+}
+
+func TestParseClient_HubNeedsNoVKLink(t *testing.T) {
+	t.Setenv(EnvHubToken, "secret")
+	c, err := ParseClient(validHubArgs(), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if c.Provider.Name != ProviderHub {
+		t.Errorf("Provider.Name: %q (expected %q)", c.Provider.Name, ProviderHub)
+	}
+	if c.Hub.URL != "https://1.2.3.4:8444/turn-creds" {
+		t.Errorf("Hub.URL: %q", c.Hub.URL)
+	}
+	if c.Hub.Token != "secret" {
+		t.Errorf("Hub.Token: %q (expected value from %s)", c.Hub.Token, EnvHubToken)
+	}
+	if len(c.VK.Links) != 0 {
+		t.Errorf("VK.Links should stay empty for -provider hub, got %v", c.VK.Links)
+	}
+}
+
+func TestParseClient_HubMissingFields(t *testing.T) {
+	tests := []struct {
+		name string
+		drop string // какой флаг убрать
+		want string
+	}{
+		{"no url", "-hub-url", "-hub-url"},
+		{"no pin", "-hub-pin", "-hub-pin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvHubToken, "secret")
+			var args []string
+			src := validHubArgs()
+			for i := 0; i < len(src); i++ {
+				if src[i] == tt.drop {
+					i++ // пропустить и значение
+					continue
+				}
+				args = append(args, src[i])
+			}
+			_, err := ParseClient(args, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("expected %s error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestParseClient_HubMissingToken(t *testing.T) {
+	t.Setenv(EnvHubToken, "")
+	_, err := ParseClient(validHubArgs(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), EnvHubToken) {
+		t.Errorf("expected %s error, got %v", EnvHubToken, err)
+	}
+}
+
 func TestParseClient_DNSServersSplit(t *testing.T) {
 	args := append(validClientArgs(), "-dns-servers", "1.1.1.1,8.8.8.8:53")
 	c, err := ParseClient(args, io.Discard)
