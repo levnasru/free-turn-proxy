@@ -116,7 +116,7 @@ const (
 
 // EnvHubToken - имя переменной окружения с Bearer-токеном хаба. Через env, а
 // не флагом: флаги видны в ps любому пользователю системы.
-const EnvHubToken = "VKTURN_HUB_TOKEN"
+const EnvHubToken = "VKTURN_HUB_TOKEN" //nolint:gosec // имя переменной окружения, не сам токен
 
 // DNSOpts - опции DNS-резолвинга (только клиент).
 type DNSOpts struct {

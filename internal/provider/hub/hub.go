@@ -193,7 +193,7 @@ func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.C
 			provider.ErrBackoffActive, time.Unix(until, 0).Format(time.TimeOnly))
 	}
 
-	creds, err := p.fetch(ctx, streamID)
+	creds, err := p.fetch(ctx)
 	if err != nil {
 		p.backoffUntil.Store(time.Now().Add(backoffAfterFailure).Unix())
 		return provider.Credentials{}, fmt.Errorf("%w: %w", provider.ErrBackoffActive, err)
@@ -221,7 +221,8 @@ func cacheDeadline(expiresAt time.Time) time.Time {
 	return deadline
 }
 
-func (p *Provider) fetch(ctx context.Context, streamID int) (provider.Credentials, error) {
+// fetch ходит в хаб за свежими кредами. Вызывается под p.mu.
+func (p *Provider) fetch(ctx context.Context) (provider.Credentials, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.URL, nil)
 	if err != nil {
 		return provider.Credentials{}, fmt.Errorf("hub: build request: %w", err)

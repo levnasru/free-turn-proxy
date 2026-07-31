@@ -129,7 +129,7 @@ func TestGetCredentialsSuccess(t *testing.T) {
 	url, pin := newPinnedServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		expiry := time.Now().Add(8 * time.Hour).Unix()
-		fmt.Fprintf(w, `{"username":"%d:590238399207","password":"pw",`+
+		_, _ = fmt.Fprintf(w, `{"username":"%d:590238399207","password":"pw",`+
 			`"turn":["turn:1.1.1.1:19302","turn:2.2.2.2:19302"]}`, expiry)
 	})
 
@@ -165,7 +165,7 @@ func TestGetCredentialsCaches(t *testing.T) {
 	url, pin := newPinnedServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		hits++
 		expiry := time.Now().Add(8 * time.Hour).Unix()
-		fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
+		_, _ = fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
 	})
 	p, err := New(Config{URL: url, PinSPKI: pin, Token: "t"})
 	if err != nil {
@@ -191,7 +191,7 @@ func TestGetCredentialsConcurrentColdStartFetchesOnce(t *testing.T) {
 		// успеют промахнуться мимо кеша до того, как первая его заполнит.
 		time.Sleep(50 * time.Millisecond)
 		expiry := time.Now().Add(8 * time.Hour).Unix()
-		fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
+		_, _ = fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
 	})
 	p, err := New(Config{URL: url, PinSPKI: pin, Token: "t"})
 	if err != nil {
@@ -223,7 +223,7 @@ func TestGetCredentialsConcurrentColdStartFetchesOnce(t *testing.T) {
 
 func TestGetCredentialsPinMismatch(t *testing.T) {
 	url, _ := newPinnedServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"username":"1:1","password":"pw","turn":"1.1.1.1:19302"}`)
+		_, _ = fmt.Fprint(w, `{"username":"1:1","password":"pw","turn":"1.1.1.1:19302"}`)
 	})
 	// Валидный по форме, но чужой пин.
 	p, err := New(Config{URL: url, PinSPKI: testPin, Token: "t"})
@@ -262,7 +262,7 @@ func TestGetCredentialsHTTPErrorEntersBackoff(t *testing.T) {
 
 func TestGetCredentialsRejectsResponseWithoutAddr(t *testing.T) {
 	url, pin := newPinnedServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"username":"1:1","password":"pw"}`)
+		_, _ = fmt.Fprint(w, `{"username":"1:1","password":"pw"}`)
 	})
 	p, err := New(Config{URL: url, PinSPKI: pin, Token: "t"})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestHandleAuthErrorInvalidatesAtThreshold(t *testing.T) {
 	url, pin := newPinnedServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		hits++
 		expiry := time.Now().Add(8 * time.Hour).Unix()
-		fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
+		_, _ = fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
 	})
 	p, err := New(Config{URL: url, PinSPKI: pin, Token: "t"})
 	if err != nil {
