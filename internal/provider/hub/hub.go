@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/logx"
@@ -93,12 +94,19 @@ type Provider struct {
 	log  logx.Logger
 	http *http.Client
 
+	// mu держится и на время похода в хаб: pipeline поднимает N стримов
+	// разом, и без сериализации все они промахиваются мимо холодного кеша
+	// одновременно, устраивая хабу N-кратный залп. Первый заполняет кеш,
+	// остальные получают готовое.
 	mu            sync.Mutex
 	cached        provider.Credentials
 	cachedUntil   time.Time
-	backoffUntil  time.Time
 	authErrors    map[int]int
 	invalidations int
+
+	// backoffUntil - unix-секунды, отдельно от mu: BackoffUntilUnix зовут
+	// из pipeline, и он не должен ждать чужой fetch.
+	backoffUntil atomic.Int64
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -174,31 +182,26 @@ type hubResponse struct {
 
 func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.Credentials, error) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Кеш мог заполниться, пока эта горутина ждала mu.
 	if time.Now().Before(p.cachedUntil) && len(p.cached.ServerAddrs) > 0 {
-		c := p.cached
-		p.mu.Unlock()
-		return c, nil
+		return p.cached, nil
 	}
-	if until := p.backoffUntil; time.Now().Before(until) {
-		p.mu.Unlock()
+	if until := p.backoffUntil.Load(); until > 0 && time.Now().Unix() < until {
 		return provider.Credentials{}, fmt.Errorf("%w: hub unreachable, retry after %s",
-			provider.ErrBackoffActive, until.Format(time.TimeOnly))
+			provider.ErrBackoffActive, time.Unix(until, 0).Format(time.TimeOnly))
 	}
-	p.mu.Unlock()
 
 	creds, err := p.fetch(ctx, streamID)
 	if err != nil {
-		p.mu.Lock()
-		p.backoffUntil = time.Now().Add(backoffAfterFailure)
-		p.mu.Unlock()
+		p.backoffUntil.Store(time.Now().Add(backoffAfterFailure).Unix())
 		return provider.Credentials{}, fmt.Errorf("%w: %w", provider.ErrBackoffActive, err)
 	}
 
-	p.mu.Lock()
 	p.cached = creds
 	p.cachedUntil = cacheDeadline(creds.ExpiresAt)
-	p.backoffUntil = time.Time{}
-	p.mu.Unlock()
+	p.backoffUntil.Store(0)
 
 	p.log.Infof("[STREAM %d] [Hub] creds fetched, turn=%s (+%d candidates), expires %s",
 		streamID, creds.ServerAddrs[0], len(creds.ServerAddrs)-1, creds.ExpiresAt.Format(time.RFC3339))
@@ -364,13 +367,6 @@ func (p *Provider) ResetErrors(streamID int) {
 	p.invalidations = 0
 }
 
-func (p *Provider) BackoffUntilUnix() int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.backoffUntil.IsZero() {
-		return 0
-	}
-	return p.backoffUntil.Unix()
-}
+func (p *Provider) BackoffUntilUnix() int64 { return p.backoffUntil.Load() }
 
 func (*Provider) Name() string { return "hub" }

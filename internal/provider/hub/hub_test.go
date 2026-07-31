@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,6 +178,46 @@ func TestGetCredentialsCaches(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Errorf("hub hits = %d, want 1 (cache shared across streams)", hits)
+	}
+}
+
+// Pipeline поднимает N стримов одновременно, и все они зовут GetCredentials
+// на холодном кеше. В хаб при этом должен уйти ОДИН запрос, а не N.
+func TestGetCredentialsConcurrentColdStartFetchesOnce(t *testing.T) {
+	var hits atomic.Int32
+	url, pin := newPinnedServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		// Задержка расширяет окно гонки: без сериализации все горутины
+		// успеют промахнуться мимо кеша до того, как первая его заполнит.
+		time.Sleep(50 * time.Millisecond)
+		expiry := time.Now().Add(8 * time.Hour).Unix()
+		fmt.Fprintf(w, `{"username":"%d:1","password":"pw","turn":"1.1.1.1:19302"}`, expiry)
+	})
+	p, err := New(Config{URL: url, PinSPKI: pin, Token: "t"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const streams = 10
+	var wg sync.WaitGroup
+	errs := make(chan error, streams)
+	for i := range streams {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.GetCredentials(context.Background(), i); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("GetCredentials: %v", err)
+	}
+
+	if got := hits.Load(); got != 1 {
+		t.Errorf("hub hits = %d, want 1 (%d streams must not stampede the hub)", got, streams)
 	}
 }
 
