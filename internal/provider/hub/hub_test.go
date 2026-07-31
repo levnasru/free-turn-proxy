@@ -325,8 +325,12 @@ func TestIsAuthError(t *testing.T) {
 		"stale nonce":                true,
 		"invalid credential":         true,
 		"authentication failed":      true,
+		"STALE NONCE":                true, // регистр не гарантирован
+		"Invalid Credential":         true,
 		"connection refused":         false,
 		"i/o timeout":                false,
+		// 403 - неразрешённый peer-адрес, а не протухшие креды.
+		"allocate: 403 Forbidden": false,
 	} {
 		if got := p.IsAuthError(errors.New(msg)); got != want {
 			t.Errorf("IsAuthError(%q) = %v, want %v", msg, got, want)

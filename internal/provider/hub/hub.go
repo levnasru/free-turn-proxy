@@ -318,18 +318,24 @@ func expiryFromUsername(user string) time.Time {
 }
 
 // IsAuthError - ошибки TURN-allocate, означающие протухшие креды. Набор тот
-// же, что у VK-провайдера: pipeline трактует их одинаково независимо от
-// источника кредов.
+// же, что у VK-провайдера, но сравнение регистронезависимое: текст приходит от
+// разных слоёв стека и регистр не гарантирован.
+//
+// 403 намеренно НЕ в списке: TURN отвечает им на неразрешённый peer-адрес, а
+// не на плохие креды, и сброс кеша по нему был бы ложным.
 func (*Provider) IsAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "401") ||
-		strings.Contains(s, "Unauthorized") ||
-		strings.Contains(s, "authentication") ||
-		strings.Contains(s, "invalid credential") ||
-		strings.Contains(s, "stale nonce")
+	s := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"401", "unauthorized", "authentication", "invalid credential", "stale nonce",
+	} {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleAuthError считает auth-ошибки и по достижении порога сбрасывает кеш,
