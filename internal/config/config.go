@@ -4,8 +4,8 @@
 // но не трогают сеть, DNS и состояние процесса. Подключение этих эффектов -
 // ответственность main() после возврата Parse*.
 //
-// Опции сгруппированы по доменам (TURN, Obf, Proxy, VK, DNS, Log) - структура
-// зеркалит концептуальные слои прокси.
+// Опции сгруппированы по доменам (TURN, Obf, Proxy, VK, Hub, DNS, Log) -
+// структура зеркалит концептуальные слои прокси.
 package config
 
 import (
@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -94,15 +95,28 @@ type VKOpts struct {
 	Platform       Platform // -platform: desktop | mobile
 }
 
+// HubOpts - опции провайдера "hub": готовые креды с доверенного эндпоинта
+// вместо самостоятельного похода в VK API (клиент не встречает captcha).
+type HubOpts struct {
+	URL   string // -hub-url
+	Pin   string // -hub-pin: base64 SHA-256 SPKI сертификата хаба
+	Token string // Bearer-токен из env VKTURN_HUB_TOKEN (не флаг: виден в ps)
+}
+
 // ProviderOpts выбирает реализацию provider.Provider.
 type ProviderOpts struct {
-	Name string // -provider: vk (default)
+	Name string // -provider: vk (default) | hub
 }
 
 // Известные имена провайдеров.
 const (
-	ProviderVK = "vk"
+	ProviderVK  = "vk"
+	ProviderHub = "hub"
 )
+
+// EnvHubToken - имя переменной окружения с Bearer-токеном хаба. Через env, а
+// не флагом: флаги видны в ps любому пользователю системы.
+const EnvHubToken = "VKTURN_HUB_TOKEN"
 
 // DNSOpts - опции DNS-резолвинга (только клиент).
 type DNSOpts struct {
@@ -127,6 +141,7 @@ type Client struct {
 	Obf      ObfOpts
 	Proxy    ProxyOpts
 	Provider ProviderOpts
+	Hub      HubOpts
 	VK       VKOpts
 	DNS      DNSOpts
 	Log      LogOpts
@@ -175,7 +190,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	turn := fs.String("turn", "", "IP TURN-сервера; override creds провайдера")
 	port := fs.String("port", "", "порт TURN-сервера; override creds провайдера")
 	listen := fs.String("listen", "127.0.0.1:9000", "локальный ip:port для WireGuard/Xray клиента")
-	provider := fs.String("provider", ProviderVK, "источник TURN-creds: vk")
+	provider := fs.String("provider", ProviderVK, "источник TURN-creds: vk | hub")
 	link := fs.String("link", "", "(устарел) одна ссылка VK Calls, используйте -links")
 	links := fs.String("links", "", "ссылки VK Calls через запятую: https://vk.ru/call/join/...,https://vk.ru/call/join/...")
 	peer := fs.String("peer", "", "адрес сервера на VPS, host:port; обязательно")
@@ -188,6 +203,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	genObfKey := fs.Bool("gen-obf-key", false, "напечатать новый -obf-key и выйти")
 	obfTiming := fs.Duration("obf-timing", 0, "межпакетная задержка для RTP-мимикрии (напр. 20ms); 0=выкл")
 	streamsPerCred := fs.Int("streams-per-cred", defaultStreamsPerCache, "TURN-потоков на один кеш VK-creds; только -provider vk")
+	hubURL := fs.String("hub-url", "", "URL эндпоинта с готовыми TURN-creds; только -provider hub")
+	hubPin := fs.String("hub-pin", "", "base64 SHA-256 SPKI сертификата хаба; только -provider hub")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	manualCaptcha := fs.Bool("manual-captcha", false, "ручная VK captcha в браузере вместо авто; только -provider vk")
 	platform := fs.String("platform", string(PlatformDesktop), "класс устройства персоны VK-auth: desktop | mobile; только -provider vk")
@@ -224,6 +241,11 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 			StreamsPerCred: *streamsPerCred,
 			ManualCaptcha:  *manualCaptcha,
 			Platform:       Platform(*platform),
+		},
+		Hub: HubOpts{
+			URL:   *hubURL,
+			Pin:   *hubPin,
+			Token: os.Getenv(EnvHubToken),
 		},
 		DNS: DNSOpts{
 			Mode: *dnsMode,
@@ -363,8 +385,21 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		if len(c.VK.Links) == 0 {
 			return nil, errors.New("need at least one valid VK link")
 		}
+	case ProviderHub:
+		// VK-специфичные проверки (-links, -streams-per-cred, -platform)
+		// намеренно пропускаются: креды приходят готовыми, в VK API клиент
+		// не ходит.
+		if c.Hub.URL == "" {
+			return nil, errors.New("need -hub-url (required for -provider hub)")
+		}
+		if c.Hub.Pin == "" {
+			return nil, errors.New("need -hub-pin (required for -provider hub)")
+		}
+		if c.Hub.Token == "" {
+			return nil, fmt.Errorf("need %s env var (required for -provider hub)", EnvHubToken)
+		}
 	default:
-		return nil, fmt.Errorf("invalid -provider value %q: must be %s", c.Provider.Name, ProviderVK)
+		return nil, fmt.Errorf("invalid -provider value %q: must be %s | %s", c.Provider.Name, ProviderVK, ProviderHub)
 	}
 	if err := validateObfProfile(c.Obf.Profile); err != nil {
 		return nil, err

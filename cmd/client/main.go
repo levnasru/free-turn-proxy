@@ -22,6 +22,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/config"
 	"github.com/samosvalishe/free-turn-proxy/internal/logx"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
+	"github.com/samosvalishe/free-turn-proxy/internal/provider/hub"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/multi"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/bondclient"
@@ -221,6 +222,14 @@ func buildProvider(cfg *config.Client, dialer net.Dialer, connected *atomic.Int3
 		}
 		logger.Infof("multi-provider: %d VK links, %d total streams", len(providers), cfg.TURN.N*len(providers))
 		return multi.New(providers), nil
+	case config.ProviderHub:
+		return hub.New(hub.Config{
+			URL:     cfg.Hub.URL,
+			PinSPKI: cfg.Hub.Pin,
+			Token:   cfg.Hub.Token,
+			Dialer:  dialer,
+			Log:     logger,
+		})
 	default:
 		return nil, fmt.Errorf("unknown provider %q", cfg.Provider.Name)
 	}
