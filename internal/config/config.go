@@ -98,9 +98,24 @@ type VKOpts struct {
 // HubOpts - опции провайдера "hub": готовые креды с доверенного эндпоинта
 // вместо самостоятельного похода в VK API (клиент не встречает captcha).
 type HubOpts struct {
-	URL   string // -hub-url
+	URL   string // -hub-url: один или несколько эндпоинтов через запятую
 	Pin   string // -hub-pin: base64 SHA-256 SPKI сертификата хаба
 	Token string // Bearer-токен из env VKTURN_HUB_TOKEN (не флаг: виден в ps)
+	Cache string // -hub-cache: путь к дисковому кешу кредов (Android за белым списком)
+}
+
+// URLList - список hub-эндпоинтов из -hub-url (через запятую). Несколько аккаунтов
+// в одном клиенте: multi.Provider их round-robin'ит, полосы аккаунтов складываются
+// (потолок ~1.7 МБ/с на userId). Pin/Token общие: пул на хабе — один Bearer/cert,
+// разные порты на аккаунт.
+func (h HubOpts) URLList() []string {
+	var out []string
+	for _, u := range strings.Split(h.URL, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // ProviderOpts выбирает реализацию provider.Provider.
@@ -117,6 +132,16 @@ const (
 // EnvHubToken - имя переменной окружения с Bearer-токеном хаба. Через env, а
 // не флагом: флаги видны в ps любому пользователю системы.
 const EnvHubToken = "VKTURN_HUB_TOKEN" //nolint:gosec // имя переменной окружения, не сам токен
+
+// hubTokenOrEnv - токен из флага -hub-token, иначе из env EnvHubToken. Флаг нужен
+// там, где env не задать (Android raw-mode запускает бинарь через ProcessBuilder
+// без своего окружения); на личном устройстве риск «токен виден в ps» приемлем.
+func hubTokenOrEnv(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv(EnvHubToken)
+}
 
 // DNSOpts - опции DNS-резолвинга (только клиент).
 type DNSOpts struct {
@@ -205,6 +230,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	streamsPerCred := fs.Int("streams-per-cred", defaultStreamsPerCache, "TURN-потоков на один кеш VK-creds; только -provider vk")
 	hubURL := fs.String("hub-url", "", "URL эндпоинта с готовыми TURN-creds; только -provider hub")
 	hubPin := fs.String("hub-pin", "", "base64 SHA-256 SPKI сертификата хаба; только -provider hub")
+	hubToken := fs.String("hub-token", "", "Bearer-токен хаба; фолбэк на env "+EnvHubToken+". Флаг виден в ps — только там, где env не задать (Android raw-mode)")
+	hubCache := fs.String("hub-cache", "", "путь к дисковому кешу кредов; только -provider hub (нужен за операторским белым списком: старт из кеша, рефетч через туннель)")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	manualCaptcha := fs.Bool("manual-captcha", false, "ручная VK captcha в браузере вместо авто; только -provider vk")
 	platform := fs.String("platform", string(PlatformDesktop), "класс устройства персоны VK-auth: desktop | mobile; только -provider vk")
@@ -245,7 +272,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		Hub: HubOpts{
 			URL:   *hubURL,
 			Pin:   *hubPin,
-			Token: os.Getenv(EnvHubToken),
+			Token: hubTokenOrEnv(*hubToken),
+			Cache: *hubCache,
 		},
 		DNS: DNSOpts{
 			Mode: *dnsMode,

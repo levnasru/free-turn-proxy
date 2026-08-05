@@ -116,7 +116,7 @@ func main() {
 
 	var connectedStreams atomic.Int32
 
-	prov, err := buildProvider(cfg, appDialer, &connectedStreams, logger)
+	prov, err := buildProvider(ctx, cfg, appDialer, &connectedStreams, logger)
 	if err != nil {
 		logger.Errorf("provider init: %v", err)
 		os.Exit(1)
@@ -131,9 +131,14 @@ func main() {
 		return c.User, c.Pass, c.ServerAddrs, nil
 	}
 
-	// Несколько -links расширяют пул: каждый звонок даёт cfg.TURN.N стримов,
-	// все объединяются в общий пул (больше параллельных TURN-аллокаций).
-	totalStreams := cfg.TURN.N * max(len(cfg.VK.Links), 1)
+	// Несколько -links (vk) или несколько -hub-url (hub) расширяют пул: каждый
+	// аккаунт даёт cfg.TURN.N стримов, все объединяются в общий пул (больше
+	// параллельных TURN-аллокаций => полосы аккаунтов складываются).
+	providerCount := len(cfg.VK.Links)
+	if cfg.Provider.Name == config.ProviderHub {
+		providerCount = len(cfg.Hub.URLList())
+	}
+	totalStreams := cfg.TURN.N * max(providerCount, 1)
 
 	if cfg.Proxy.Mode != config.ProxyModeUDP {
 		tcpDtlsDialer := &dtlsdial.Dialer{
@@ -190,7 +195,7 @@ func main() {
 
 // buildProvider строит provider.Provider по cfg.Provider.Name. Одна -links даёт
 // обычный vk.Provider; несколько - multi.Provider (один vk.Provider на ссылку).
-func buildProvider(cfg *config.Client, dialer net.Dialer, connected *atomic.Int32, logger logx.Logger) (provider.Provider, error) {
+func buildProvider(ctx context.Context, cfg *config.Client, dialer net.Dialer, connected *atomic.Int32, logger logx.Logger) (provider.Provider, error) {
 	switch cfg.Provider.Name {
 	case config.ProviderVK:
 		if len(cfg.VK.Links) == 0 {
@@ -223,13 +228,34 @@ func buildProvider(cfg *config.Client, dialer net.Dialer, connected *atomic.Int3
 		logger.Infof("multi-provider: %d VK links, %d total streams", len(providers), cfg.TURN.N*len(providers))
 		return multi.New(providers), nil
 	case config.ProviderHub:
-		return hub.New(hub.Config{
-			URL:     cfg.Hub.URL,
-			PinSPKI: cfg.Hub.Pin,
-			Token:   cfg.Hub.Token,
-			Dialer:  dialer,
-			Log:     logger,
-		})
+		urls := cfg.Hub.URLList()
+		if len(urls) == 0 {
+			return nil, fmt.Errorf("hub: no -hub-url configured")
+		}
+		newHub := func(u string) (provider.Provider, error) {
+			return hub.New(hub.Config{
+				URL:       u,
+				PinSPKI:   cfg.Hub.Pin,
+				Token:     cfg.Hub.Token,
+				CacheFile: hub.CacheFor(cfg.Hub.Cache, u, len(urls)),
+				Dialer:    dialer,
+				Log:       logger,
+				Ctx:       ctx,
+			})
+		}
+		if len(urls) == 1 {
+			return newHub(urls[0])
+		}
+		providers := make([]provider.Provider, 0, len(urls))
+		for i, u := range urls {
+			p, err := newHub(u)
+			if err != nil {
+				return nil, fmt.Errorf("hub provider [%d]: %w", i, err)
+			}
+			providers = append(providers, p)
+		}
+		logger.Infof("multi-provider: %d hub accounts, %d total streams", len(providers), cfg.TURN.N*len(providers))
+		return multi.New(providers), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q", cfg.Provider.Name)
 	}

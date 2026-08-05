@@ -20,11 +20,17 @@ import (
 // порядке предпочтения.
 type GetCredsFunc func(ctx context.Context, streamID int) (user, pass string, rawURLs []string, err error)
 
+// candidateIdx - индекс j-го по счёту кандидата для стрима streamID: стартовая
+// точка сдвинута на streamID, дальше по кругу. Так стримы распределяются по
+// разным relay вместо того, чтобы всем садиться на первый. streamID
+// неотрицательный (1-based в udprelay и tcpfwd, 0 в тестах).
+func candidateIdx(streamID, j, n int) int { return (streamID + j) % n }
+
 // DialTURN получает реквизиты и открывает TURN-поток, пробуя кандидатов по
-// очереди: если allocate на первом не проходит (DPI-дроп/RST на relay-IP),
-// берёт следующий. Возвращает первый успешный Stream. Вызывающий отвечает за
-// закрытие потока и политику retry при auth-ошибке (udprelay) или перезапуска
-// сессии (tcpfwd).
+// очереди со сдвигом по streamID (см. candidateIdx): если allocate не проходит
+// (DPI-дроп/RST на relay-IP), берёт следующего по кругу. Возвращает первый
+// успешный Stream. Вызывающий отвечает за закрытие потока и политику retry при
+// auth-ошибке (udprelay) или перезапуска сессии (tcpfwd).
 func DialTURN(ctx context.Context, host, port string, udp bool, peer *net.UDPAddr, streamID int, getCreds GetCredsFunc) (*turndial.Stream, error) {
 	user, pass, rawURLs, err := getCreds(ctx, streamID)
 	if err != nil {
@@ -39,7 +45,9 @@ func DialTURN(ctx context.Context, host, port string, udp bool, peer *net.UDPAdd
 		rawURLs = rawURLs[:1]
 	}
 	var errs []error
-	for _, rawURL := range rawURLs {
+	n := len(rawURLs)
+	for j := 0; j < n; j++ {
+		rawURL := rawURLs[candidateIdx(streamID, j, n)]
 		stream, derr := turndial.Open(ctx, turndial.Config{
 			HostOverride: host,
 			PortOverride: port,

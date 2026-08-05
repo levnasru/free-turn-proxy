@@ -24,12 +24,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +53,24 @@ const (
 	// fallbackLifetime - на сколько кешировать, если expiry из username не
 	// разобрался. Консервативно мало: лучше лишний запрос, чем мёртвые креды.
 	fallbackLifetime = 10 * time.Minute
+
+	// refreshMargin - за сколько до истечения фоново сходить за свежими кредами.
+	//
+	// Ленивого обновления не хватает: поднятые стримы за кредами больше не
+	// ходят, поэтому клиент, просидевший за операторским белым списком дольше
+	// срока жизни кредов (~8ч), теряет и RAM-кеш, и дисковый - а хаб к тому
+	// моменту достижим только ЧЕРЕЗ туннель, который без кредов не поднять.
+	// Обновляемся заранее, пока туннель ещё жив.
+	refreshMargin = time.Hour
+
+	// refreshTick - как часто проверять, не пора ли обновляться.
+	refreshTick = time.Minute
+
+	// refreshRetryAfter - пауза после безрезультатной попытки фонового
+	// обновления (хаб не ответил или отдал те же креды с тем же expiry).
+	// Отдельно от backoffUntil: тот блокирует и обычный GetCredentials, а
+	// текущие креды ещё живы и новым стримам их отдавать можно.
+	refreshRetryAfter = 5 * time.Minute
 
 	// authErrorThreshold - сколько auth-ошибок подряд на стрим терпеть до
 	// инвалидации кеша.
@@ -85,6 +105,18 @@ type Config struct {
 
 	// Log - уровневый логгер. nil -> no-op.
 	Log logx.Logger
+
+	// CacheFile - путь к дисковому кешу кредов (опционально). Нужен там, где
+	// хаб недостижим напрямую (Android за операторским белым списком): холодный
+	// старт/реконнект поднимает туннель на кешированных кредах, не стуча в хаб,
+	// а свежие подтягиваются уже ЧЕРЕЗ туннель и перезаписывают кеш. Пусто -
+	// кеш только в RAM (десктоп, где хаб доступен напрямую).
+	CacheFile string
+
+	// Ctx - контекст жизни сессии. Задан -> провайдер поднимает фоновое
+	// обновление кредов (см. refreshMargin) и глушит его по отмене. nil ->
+	// обновление только ленивое, по запросу стрима.
+	Ctx context.Context
 }
 
 // Provider реализует provider.Provider поверх хаба. Кеш общий на все стримы:
@@ -104,6 +136,10 @@ type Provider struct {
 	authErrors    map[int]int
 	invalidations int
 
+	// refreshNotBefore - до какого момента не повторять фоновое обновление
+	// после безрезультатной попытки (см. refreshRetryAfter).
+	refreshNotBefore time.Time
+
 	// backoffUntil - unix-секунды, отдельно от mu: BackoffUntilUnix зовут
 	// из pipeline, и он не должен ждать чужой fetch.
 	backoffUntil atomic.Int64
@@ -120,12 +156,139 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil || len(pin) != sha256.Size {
 		return nil, fmt.Errorf("hub: -hub-pin must be base64 SHA-256 of SPKI (%d bytes)", sha256.Size)
 	}
-	return &Provider{
+	p := &Provider{
 		cfg:        cfg,
 		log:        logx.OrNop(cfg.Log),
 		http:       newPinnedClient(cfg.Dialer, pin),
 		authErrors: make(map[int]int),
-	}, nil
+	}
+	p.loadCache()
+	if cfg.Ctx != nil {
+		go p.refreshLoop(cfg.Ctx)
+	}
+	return p, nil
+}
+
+// refreshLoop заранее перезабирает креды, пока туннель ещё жив (см.
+// refreshMargin). Без него клиент, просидевший за белым списком дольше срока
+// жизни кредов, остаётся и без кеша, и без доступа к хабу.
+func (p *Provider) refreshLoop(ctx context.Context) {
+	t := time.NewTicker(refreshTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.refreshIfDue(ctx)
+		}
+	}
+}
+
+func (p *Provider) refreshIfDue(ctx context.Context) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	// Кредов ещё не было, либо expiry неизвестен - обновит ленивый путь.
+	if len(p.cached.ServerAddrs) == 0 || p.cached.ExpiresAt.IsZero() {
+		return
+	}
+	if now.Before(p.refreshNotBefore) {
+		return
+	}
+	if now.Before(p.cached.ExpiresAt.Add(-refreshMargin)) {
+		return
+	}
+
+	creds, err := p.fetch(ctx)
+	if err != nil {
+		p.refreshNotBefore = now.Add(refreshRetryAfter)
+		p.log.Warnf("[Hub] proactive refresh failed (%v); current creds expire %s",
+			err, p.cached.ExpiresAt.Format(time.RFC3339))
+		return
+	}
+	if !creds.ExpiresAt.After(p.cached.ExpiresAt) {
+		// Хаб ещё не переминтил - ждём, не долбим его каждую минуту.
+		p.refreshNotBefore = now.Add(refreshRetryAfter)
+		return
+	}
+
+	p.cached = creds
+	p.cachedUntil = cacheDeadline(creds.ExpiresAt)
+	p.refreshNotBefore = time.Time{}
+	p.backoffUntil.Store(0)
+	p.saveCache(creds)
+	p.log.Infof("[Hub] creds refreshed proactively, turn=%s, expires %s",
+		creds.ServerAddrs[0], creds.ExpiresAt.Format(time.RFC3339))
+}
+
+// CacheFor выводит путь кеша для конкретного hub-URL. При одном аккаунте отдаёт
+// base как есть; при нескольких (multi-hub) даёт каждому свой файл (суффикс -
+// короткий хеш URL), иначе провайдеры затирали бы креды друг друга. Пустой base
+// -> пусто (кеш выключен).
+func CacheFor(base, url string, total int) string {
+	if base == "" || total <= 1 {
+		return base
+	}
+	sum := sha256.Sum256([]byte(url))
+	return base + "." + hex.EncodeToString(sum[:4])
+}
+
+// diskEntry - формат дискового кеша (см. Config.CacheFile).
+type diskEntry struct {
+	User        string    `json:"user"`
+	Pass        string    `json:"pass"`
+	ServerAddrs []string  `json:"server_addrs"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// loadCache подгружает креды с диска в RAM-кеш, если файл есть и они не протухли.
+// Позволяет холодному старту за белым списком оператора поднять туннель, не ходя
+// в недостижимый хаб. Ошибки не фатальны - просто пойдём в хаб.
+func (p *Provider) loadCache() {
+	if p.cfg.CacheFile == "" {
+		return
+	}
+	b, err := os.ReadFile(p.cfg.CacheFile)
+	if err != nil {
+		return
+	}
+	var e diskEntry
+	if json.Unmarshal(b, &e) != nil || len(e.ServerAddrs) == 0 {
+		return
+	}
+	creds := provider.Credentials{User: e.User, Pass: e.Pass, ServerAddrs: e.ServerAddrs, ExpiresAt: e.ExpiresAt}
+	// cached держим всегда (даже протухшее) - это ЧС-фолбэк в fetchOrStale.
+	// cachedUntil в будущее ставим только для реально свежих: иначе первый
+	// GetCredentials сходит в хаб за свежими, а к старым откатится лишь при сбое.
+	p.cached = creds
+	deadline := cacheDeadline(creds.ExpiresAt)
+	if deadline.After(time.Now()) {
+		p.cachedUntil = deadline
+		p.log.Infof("[Hub] creds loaded from cache (fresh), turn=%s, expires %s",
+			creds.ServerAddrs[0], creds.ExpiresAt.Format(time.RFC3339))
+	} else {
+		p.log.Infof("[Hub] creds loaded from cache (stale, emergency fallback only), turn=%s", creds.ServerAddrs[0])
+	}
+}
+
+// saveCache атомарно (temp+rename) пишет свежие креды на диск. Вызывается под p.mu.
+func (p *Provider) saveCache(creds provider.Credentials) {
+	if p.cfg.CacheFile == "" {
+		return
+	}
+	b, err := json.Marshal(diskEntry{User: creds.User, Pass: creds.Pass, ServerAddrs: creds.ServerAddrs, ExpiresAt: creds.ExpiresAt})
+	if err != nil {
+		return
+	}
+	tmp := p.cfg.CacheFile + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) != nil {
+		return
+	}
+	if err := os.Rename(tmp, p.cfg.CacheFile); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // newPinnedClient строит HTTP-клиент, доверяющий ровно одному публичному
@@ -196,12 +359,21 @@ func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.C
 	creds, err := p.fetch(ctx)
 	if err != nil {
 		p.backoffUntil.Store(time.Now().Add(backoffAfterFailure).Unix())
+		// ЧС-фолбэк: хаб недостижим (белый список оператора), но на руках есть
+		// прошлые turns. Часто VK их не меняет и старые креды ещё принимаются -
+		// пробуем их, чтобы хоть как-то подняться. Не приняли -> обычный auth-путь.
+		if len(p.cached.ServerAddrs) > 0 {
+			p.log.Warnf("[STREAM %d] [Hub] fetch failed (%v); using stale cached creds as emergency fallback, turn=%s",
+				streamID, err, p.cached.ServerAddrs[0])
+			return p.cached, nil
+		}
 		return provider.Credentials{}, fmt.Errorf("%w: %w", provider.ErrBackoffActive, err)
 	}
 
 	p.cached = creds
 	p.cachedUntil = cacheDeadline(creds.ExpiresAt)
 	p.backoffUntil.Store(0)
+	p.saveCache(creds)
 
 	p.log.Infof("[STREAM %d] [Hub] creds fetched, turn=%s (+%d candidates), expires %s",
 		streamID, creds.ServerAddrs[0], len(creds.ServerAddrs)-1, creds.ExpiresAt.Format(time.RFC3339))
