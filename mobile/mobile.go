@@ -83,6 +83,7 @@ var (
 	running    atomic.Bool
 	sessionGen atomic.Int64 // номер текущей сессии; растёт на каждый Start/Stop
 	trafficVal atomic.Pointer[sessionTraffic]
+	runWG      sync.WaitGroup // сигналит, когда udprelay/tcpfwd.Run реально вернулся (TURN-аллокации освобождены)
 )
 
 func setStatus(s *statusInfo) { statusVal.Store(s) }
@@ -234,7 +235,9 @@ func startWithArgs(args []string, clientType string) error {
 	setStatus(&statusInfo{state: StateConnecting, total: cfg.TURN.N})
 	go traffic.rateMeter(ctx)
 
+	runWG.Add(1)
 	go func() {
+		defer runWG.Done()
 		var finalErr error
 		var watchdogErr error
 		var counters sync.WaitGroup
@@ -400,18 +403,27 @@ func startWithArgs(args []string, clientType string) error {
 	return nil
 }
 
-// Stop останавливает прокси-клиент.
+// Stop останавливает прокси-клиент. Блокируется, пока TURN-аллокации не
+// будут реально освобождены (udprelay/tcpfwd.Run вернулся) - иначе быстрый
+// Stop+Start бьёт новыми Allocate по тем же кредам раньше, чем сервер
+// увидел Refresh(0) от предыдущей сессии, и квота ошибочно выглядит исчерпанной.
 func Stop() {
 	mu.Lock()
-	defer mu.Unlock()
-	if cancelFn != nil {
-		cancelFn()
+	fn := cancelFn
+	if fn != nil {
 		cancelFn = nil
 		running.Store(false)
 		sessionGen.Add(1)
 		trafficVal.Store(nil)
 	}
+	mu.Unlock()
+
 	setStatus(&statusInfo{state: StateIdle})
+
+	if fn != nil {
+		fn()
+		runWG.Wait()
+	}
 }
 
 func buildProvider(ctx context.Context, cfg *config.Client, dialer net.Dialer, connected *atomic.Int32, solver vk.ManualSolverFunc, logger logx.Logger) (provider.Provider, error) {
