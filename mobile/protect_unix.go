@@ -2,7 +2,6 @@ package mobile
 
 import (
 	"net"
-	"os"
 	"syscall"
 )
 
