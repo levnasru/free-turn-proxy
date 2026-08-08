@@ -21,6 +21,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/client/dnsdial"
 	"github.com/samosvalishe/free-turn-proxy/internal/config"
 	"github.com/samosvalishe/free-turn-proxy/internal/logx"
+	"github.com/samosvalishe/free-turn-proxy/internal/netctl"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/hub"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/multi"
@@ -31,6 +32,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/sub"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
+	"github.com/samosvalishe/free-turn-proxy/mobile"
 )
 
 // version is populated at build time via -ldflags "-X main.version=...".
@@ -68,6 +70,19 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if cfg.Proxy.ProtectPath != "" {
+		netctl.SetControl(func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				opErr = mobile.SendFD(cfg.Proxy.ProtectPath, int(fd))
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		})
+	}
 
 	cfg.ClientID = resolveClientID(cfg.ClientID)
 

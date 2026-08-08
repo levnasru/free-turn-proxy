@@ -71,12 +71,12 @@ type ObfOpts struct {
 // Enabled возвращает true когда выбран реальный профиль обфускации.
 func (o ObfOpts) Enabled() bool { return o.Profile != ObfProfileNone }
 
-// ProxyOpts - опции прокси прикладного уровня.
 type ProxyOpts struct {
-	Mode    ProxyMode // udp | tcpfwd | tcpfwd-bond (сервер: udp | tcpfwd)
-	Listen  string    // -listen: локальный bind (клиент: WG/TCP entry; сервер: TURN entry)
-	Connect string    // -connect: backend (только сервер)
-	Peer    string    // -peer: адрес серверного прокси, куда дозванивается клиент (только клиент)
+	Mode        ProxyMode // udp | tcpfwd | tcpfwd-bond (сервер: udp | tcpfwd)
+	Listen      string    // -listen: локальный bind (клиент: WG/TCP entry; сервер: TURN entry)
+	Connect     string    // -connect: backend (только сервер)
+	Peer        string    // -peer: адрес серверного прокси, куда дозванивается клиент (только клиент)
+	ProtectPath string    // -protect-path: путь к Unix socket (SCM_RIGHTS) для защиты FDs от VPN
 }
 
 // Platform выбирает класс устройства персоны (мобильность UA/device/client hints).
@@ -239,6 +239,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	dnsServers := fs.String("dns-servers", "", "свои UDP/53 DNS через запятую: ip[:port][,ip[:port]...]")
 	clientID := fs.String("client-id", "", "уникальный ID клиента (автогенерация если не задан)")
 	subURL := fs.String("sub", "", "URL подписки (sub.md) для получения списка серверов")
+	protectPath := fs.String("protect-path", "", "путь к Unix socket для SCM_RIGHTS (VPN protect)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -257,9 +258,10 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 			Timing:  *obfTiming,
 		},
 		Proxy: ProxyOpts{
-			Mode:   ClientProxyMode(*mode, *bond),
-			Listen: *listen,
-			Peer:   *peer,
+			Mode:        ClientProxyMode(*mode, *bond),
+			Listen:      *listen,
+			Peer:        *peer,
+			ProtectPath: *protectPath,
 		},
 		Provider: ProviderOpts{
 			Name: *provider,

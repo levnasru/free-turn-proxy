@@ -98,7 +98,7 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 	} else {
 		dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 		defer cancel()
-		var d net.Dialer
+		d := net.Dialer{Control: netctl.Apply}
 		c, derr := d.DialContext(dctx, "tcp", turnServerAddr)
 		if derr != nil {
 			return nil, fmt.Errorf("dial TURN (tcp): %w", derr)
