@@ -22,3 +22,7 @@ dist
 .agentsroom/handoff-transcript-*.txt
 .agentsroom/handoff-summary-*.md
 .agents/mcp_config.json
+/bin/
+/dist-android/
+/.codegraph/
+/.agent/
