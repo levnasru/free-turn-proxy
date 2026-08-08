@@ -367,6 +367,8 @@ func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.C
 				streamID, err, p.cached.ServerAddrs[0])
 			return p.cached, nil
 		}
+		
+		p.log.Errorf("fatal error: hub_fetch_failed: %v", err)
 		return provider.Credentials{}, fmt.Errorf("%w: %w", provider.ErrBackoffActive, err)
 	}
 
