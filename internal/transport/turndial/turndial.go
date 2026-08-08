@@ -169,14 +169,14 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 			if cerr := relay.Close(); cerr != nil {
 				firstErr = cerr
 			}
-			
+
 			// pion/turn sends a Refresh(Lifetime=0) request asynchronously (dontWait=true)
 			// inside relay.Close() to delete the allocation. We must wait briefly so that
 			// the STUN packet is flushed to the network before we close the underlying socket.
 			// Otherwise, the TURN server keeps the allocation alive (usually for 10 minutes),
 			// preventing immediate reconnection with the same credentials/ports.
 			time.Sleep(100 * time.Millisecond)
-			
+
 			client.Close()
 			if cerr := closeConn(); cerr != nil && firstErr == nil {
 				firstErr = cerr
