@@ -165,6 +165,7 @@ func main() {
 			DTLSDialer:  tcpDtlsDialer,
 			Log:         logger,
 			BondHandler: bondH.Handle,
+			Auth:        prov,
 		}
 		tcpParams := &tcpfwd.Params{
 			Host:         cfg.TURN.Host,
