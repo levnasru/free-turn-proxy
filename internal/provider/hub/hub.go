@@ -259,14 +259,18 @@ func (p *Provider) loadCache() {
 		return
 	}
 	creds := provider.Credentials{User: e.User, Pass: e.Pass, ServerAddrs: e.ServerAddrs, ExpiresAt: e.ExpiresAt}
-	// cached держим всегда (даже протухшее) - это ЧС-фолбэк в fetchOrStale.
-	// cachedUntil в будущее ставим только для реально свежих: иначе первый
-	// GetCredentials сходит в хаб за свежими, а к старым откатится лишь при сбое.
+	// cached держим всегда (даже протухшее) - это ЧС-фолбэк в GetCredentials,
+	// когда fetch() не смог достучаться до хаба.
+	//
+	// cachedUntil НЕ трогаем (остаётся нулевым): дисковый кеш мог протухнуть
+	// на хабе раньше своего ExpiresAt (переминт, ревок, смена аккаунта) без
+	// следа в файле, а по времени всё ещё выглядеть свежим. Поэтому первый
+	// GetCredentials после старта обязан сходить в хаб и подтвердить креды,
+	// а не поверить файлу на слово; на недоступный хаб (белый список
+	// оператора) он всё равно откатится к этому же p.cached в error-ветке.
 	p.cached = creds
-	deadline := cacheDeadline(creds.ExpiresAt)
-	if deadline.After(time.Now()) {
-		p.cachedUntil = deadline
-		p.log.Infof("[Hub] creds loaded from cache (fresh), turn=%s, expires %s",
+	if cacheDeadline(creds.ExpiresAt).After(time.Now()) {
+		p.log.Infof("[Hub] creds loaded from cache (fresh, pending hub confirmation), turn=%s, expires %s",
 			creds.ServerAddrs[0], creds.ExpiresAt.Format(time.RFC3339))
 	} else {
 		p.log.Infof("[Hub] creds loaded from cache (stale, emergency fallback only), turn=%s", creds.ServerAddrs[0])

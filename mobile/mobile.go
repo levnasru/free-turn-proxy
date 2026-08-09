@@ -356,6 +356,7 @@ func startWithArgs(args []string, clientType string) error {
 				DTLSDialer:  tcpDtlsDialer,
 				Log:         logger,
 				BondHandler: bondH.Handle,
+				Auth:        prov,
 			}
 			tcpParams := &tcpfwd.Params{
 				Host:         cfg.TURN.Host,

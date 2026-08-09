@@ -2,6 +2,7 @@ package tcpfwd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/clientsdb"
 	"github.com/samosvalishe/free-turn-proxy/internal/logx"
 	"github.com/samosvalishe/free-turn-proxy/internal/netconn"
+	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
@@ -21,6 +23,16 @@ import (
 
 // GetCredsFunc реэкспортирован из common, чтобы вызывающие не выходили за пределы импортов пакета.
 type GetCredsFunc = common.GetCredsFunc
+
+// AuthHandler - подмножество provider.Provider, нужное для auth-инвалидации и
+// backoff. Тот же контракт, что использует udprelay (см. пакет там же) -
+// pipeline не должен различаться по транспорту в том, как он слушается провайдера.
+type AuthHandler interface {
+	IsAuthError(err error) bool
+	HandleAuthError(streamID int) bool
+	ResetErrors(streamID int)
+	BackoffUntilUnix() int64
+}
 
 // Params - конфигурация TURN/obf для пула.
 type Params struct {
@@ -46,6 +58,7 @@ type Deps struct {
 	DTLSDialer  *dtlsdial.Dialer
 	Log         logx.Logger
 	BondHandler BondHandler
+	Auth        AuthHandler
 }
 
 func (d *Deps) log() logx.Logger {
@@ -197,11 +210,23 @@ func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.
 
 		smuxSess, cleanup, err := createSmuxSession(ctx, deps, params, peer, id)
 		if err != nil {
-			deps.log().Errorf("[session %d] setup error: %s, retrying...", id, err)
+			wait := 3 * time.Second
+			if errors.Is(err, provider.ErrBackoffActive) {
+				// Провайдер просит подождать (квота/rate-limit) - жёсткий 3s-ретрай
+				// в этом случае просто спамит лог и локальный backoff-чек впустую;
+				// ждём столько же, сколько ждал бы стрим в udprelay.
+				wait = 60 * time.Second
+				if until := deps.Auth.BackoffUntilUnix(); until > 0 {
+					if d := time.Until(time.Unix(until, 0)); d > 0 {
+						wait = d
+					}
+				}
+			}
+			deps.log().Errorf("[session %d] setup error: %s, retrying in %s...", id, err, wait)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(3 * time.Second):
+			case <-time.After(wait):
 			}
 			continue
 		}
@@ -243,8 +268,12 @@ func createSmuxSession(ctx context.Context, deps *Deps, params *Params, peer *ne
 
 	stream, err := common.DialTURN(ctx, params.Host, params.Port, params.TransportUDP, peer, id, params.GetCreds)
 	if err != nil {
+		if deps.Auth.IsAuthError(err) {
+			deps.Auth.HandleAuthError(id)
+		}
 		return nil, nil, err
 	}
+	deps.Auth.ResetErrors(id)
 	cleanupFns = append(cleanupFns, func() { _ = stream.Close() })
 	relayConn := stream.Relay
 	deps.log().Debugf("[session %d] TURN server IP: %s", id, stream.ServerUDPAddr.IP)

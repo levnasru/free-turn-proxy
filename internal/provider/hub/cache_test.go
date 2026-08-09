@@ -33,7 +33,8 @@ func TestCacheFor(t *testing.T) {
 }
 
 // TestDiskCacheRoundTrip: успешный fetch пишет файл; новый Provider поднимает
-// свежий кеш и отдаёт его БЕЗ похода в хаб.
+// кеш как ЧС-фолбэк, но на старте всё равно подтверждает креды в хабе, а не
+// верит файлу на слово (файл мог протухнуть на хабе раньше своего ExpiresAt).
 func TestDiskCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cacheFile := filepath.Join(dir, "creds.json")
@@ -58,7 +59,8 @@ func TestDiskCacheRoundTrip(t *testing.T) {
 		t.Fatalf("cache file not written: %v", err)
 	}
 
-	// новый провайдер (эмулируем рестарт app) — свежий кеш, в хаб не идём
+	// новый провайдер (эмулируем рестарт app) — кеш на диске свежий, но хаб
+	// доступен и должен быть спрошен первым
 	p2, err := New(Config{URL: url, PinSPKI: pin, Token: "s", CacheFile: cacheFile})
 	if err != nil {
 		t.Fatal(err)
@@ -67,8 +69,8 @@ func TestDiskCacheRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if atomic.LoadInt32(&hits) != 1 {
-		t.Errorf("hits after restart = %d, want still 1 (served from disk)", hits)
+	if atomic.LoadInt32(&hits) != 2 {
+		t.Errorf("hits after restart = %d, want 2 (hub confirmed, not just trusted disk cache)", hits)
 	}
 	if creds.ServerAddrs[0] != "1.1.1.1:19302" {
 		t.Errorf("addr = %q", creds.ServerAddrs[0])
