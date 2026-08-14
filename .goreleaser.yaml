@@ -74,6 +74,21 @@ builds:
     targets:
       - android_arm64
 
+  # Desktop terminal client (vk-turn subprocess launcher + xray-subscription
+  # mode) — pure Go, no CGO, matches client/server's build profile.
+  - id: desktop
+    main: ./cmd/desktop
+    binary: vkturn-desktop
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    targets:
+      - windows_amd64
+      - linux_amd64
+
 archives:
   # Android: ship the .so binary directly (no archive wrapper), with
   # arch suffix so arm64 and arm coexist on the release page.
@@ -90,6 +105,7 @@ archives:
     ids:
       - client
       - server
+      - desktop
     formats: [binary]
     name_template: >-
       {{ .Binary }}-{{ .Os }}-{{ .Arch }}

@@ -51,3 +51,24 @@ func TestBuildClientArgsMultipleHubURLs(t *testing.T) {
 		t.Fatalf("expected comma-joined hub-url, got %q", joined)
 	}
 }
+
+func TestConvertSubscriptionParsesShareLinks(t *testing.T) {
+	// Two share-links, base64-joined by newline, as a real 3x-ui subscription
+	// body would look (see docs/sub.md-adjacent research in the design doc).
+	body := "dmxlc3M6Ly9leGFtcGxlLTEKdmxlc3M6Ly9leGFtcGxlLTI=" // "vless://example-1\nvless://example-2"
+	_, err := convertSubscription(body)
+	// This link isn't a real vless URI, so libXray will fail to convert it —
+	// that's fine for this test, which only checks that convertSubscription
+	// doesn't error on decode/line-splitting itself. Full conversion is
+	// exercised against a real subscription URL in the Step 6 live test.
+	if err != nil {
+		t.Fatalf("convertSubscription should not fail on decode/split, got: %v", err)
+	}
+}
+
+func TestConvertSubscriptionRejectsEmptyBody(t *testing.T) {
+	_, err := convertSubscription("")
+	if err == nil {
+		t.Fatal("expected error for empty subscription body")
+	}
+}
