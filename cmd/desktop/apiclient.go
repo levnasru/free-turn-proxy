@@ -10,7 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// httpClient replaces http.DefaultClient (which has no timeout) for every
+// portal request. Without this, a down/unreachable portal hangs the app
+// forever with no feedback — the ctx passed in still applies on top for
+// callers that want a tighter deadline.
+var httpClient = &http.Client{Timeout: 20 * time.Second}
 
 func Login(ctx context.Context, baseURL, username, password string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
@@ -19,7 +26,7 @@ func Login(ctx context.Context, baseURL, username, password string) (string, err
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -45,7 +52,7 @@ func FetchConfig(ctx context.Context, baseURL, token string) (*DesktopConfig, er
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
