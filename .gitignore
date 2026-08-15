@@ -9,9 +9,11 @@ CLAUDE.md
 /build/
 *.test
 coverage.out
-# Скомпилированные бинари cmd/client и cmd/server
+# Скомпилированные бинари cmd/client, cmd/server и cmd/desktop
 /client
 /server
+/desktop
+/vkturn-desktop*
 .env
 clients.json
 client_config.json
