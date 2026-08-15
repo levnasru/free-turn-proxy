@@ -19,6 +19,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -31,6 +32,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +68,13 @@ const (
 	// refreshTick - как часто проверять, не пора ли обновляться.
 	refreshTick = time.Minute
 
+	// heartbeatTick - как часто сообщать хабу число реально живых стримов
+	// (см. Config.StreamsAlive). Хаб раньше знал только то, что выдал -
+	// не сколько из выданного реально используется в моменте (P8). Отдельно
+	// от refreshTick: обновление кредов и телеметрия занятости живут на разных
+	// таймлайнах, кредам восьмичасовой запас, живости - нет.
+	heartbeatTick = 20 * time.Second
+
 	// refreshRetryAfter - пауза после безрезультатной попытки фонового
 	// обновления (хаб не ответил или отдал те же креды с тем же expiry).
 	// Отдельно от backoffUntil: тот блокирует и обычный GetCredentials, а
@@ -99,6 +108,16 @@ type Config struct {
 
 	// Token - Bearer-токен авторизации. Обязателен.
 	Token string
+
+	// ClientID - идентификатор этого клиента (cfg.ClientID, автогенерируется
+	// и переживает рестарты, см. resolveClientID). Опционален: пусто -
+	// heartbeat (см. StreamsAlive) не запускается, только обновление кредов.
+	ClientID string
+
+	// StreamsAlive возвращает текущее число живых стримов этого клиента.
+	// Опционален по той же причине, что и ClientID: без него P8-heartbeat
+	// выключен целиком, хаб просто не видит текущую занятость.
+	StreamsAlive func() int32
 
 	// Dialer используется для исходящего соединения к хабу.
 	Dialer net.Dialer
@@ -143,6 +162,11 @@ type Provider struct {
 	// backoffUntil - unix-секунды, отдельно от mu: BackoffUntilUnix зовут
 	// из pipeline, и он не должен ждать чужой fetch.
 	backoffUntil atomic.Int64
+
+	// hbURL - куда слать heartbeat (см. Config.StreamsAlive), выведен из
+	// cfg.URL один раз в New. Пусто, если cfg.URL не распарсился как URL -
+	// heartbeatLoop тогда не запускается.
+	hbURL string
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -166,7 +190,57 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.Ctx != nil {
 		go p.refreshLoop(cfg.Ctx)
 	}
+	if cfg.Ctx != nil && cfg.StreamsAlive != nil && cfg.ClientID != "" {
+		if hu, err := url.Parse(cfg.URL); err == nil {
+			hu.Path = "/heartbeat"
+			hu.RawQuery = ""
+			p.hbURL = hu.String()
+			go p.heartbeatLoop(cfg.Ctx)
+		}
+	}
 	return p, nil
+}
+
+// heartbeatLoop сообщает хабу число реально живых стримов этого клиента, пока
+// туннель поднят, и один финальный ноль при остановке - иначе разрыв виден
+// хабу только по истечении таймаута занятости, не сразу (см. P8 в CLAUDE.md).
+// Best-effort: ошибки только логируются, heartbeat не влияет на туннель.
+func (p *Provider) heartbeatLoop(ctx context.Context) {
+	t := time.NewTicker(heartbeatTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			p.sendHeartbeat(context.Background(), 0)
+			return
+		case <-t.C:
+			p.sendHeartbeat(ctx, p.cfg.StreamsAlive())
+		}
+	}
+}
+
+func (p *Provider) sendHeartbeat(ctx context.Context, count int32) {
+	body, err := json.Marshal(struct {
+		ClientID string `json:"clientId"`
+		Count    int32  `json:"count"`
+	}{ClientID: p.cfg.ClientID, Count: count})
+	if err != nil {
+		return
+	}
+	hctx, cancel := context.WithTimeout(ctx, httpTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(hctx, http.MethodPost, p.hbURL, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+p.cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.http.Do(req)
+	if err != nil {
+		p.log.Debugf("hub: heartbeat: %s", err)
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // refreshLoop заранее перезабирает креды, пока туннель ещё жив (см.

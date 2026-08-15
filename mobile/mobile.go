@@ -466,13 +466,15 @@ func buildProvider(ctx context.Context, cfg *config.Client, dialer net.Dialer, c
 		}
 		newHub := func(u string) (provider.Provider, error) {
 			return hub.New(hub.Config{
-				URL:       u,
-				PinSPKI:   cfg.Hub.Pin,
-				Token:     cfg.Hub.Token,
-				CacheFile: hub.CacheFor(cfg.Hub.Cache, u, len(urls)),
-				Dialer:    dialer,
-				Log:       logger,
-				Ctx:       ctx,
+				URL:          u,
+				PinSPKI:      cfg.Hub.Pin,
+				Token:        cfg.Hub.Token,
+				CacheFile:    hub.CacheFor(cfg.Hub.Cache, u, len(urls)),
+				Dialer:       dialer,
+				Log:          logger,
+				Ctx:          ctx,
+				ClientID:     cfg.ClientID,
+				StreamsAlive: connected.Load,
 			})
 		}
 		if len(urls) == 1 {
