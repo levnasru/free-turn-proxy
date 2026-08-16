@@ -64,9 +64,10 @@ jobs:
         env:
           CGO_ENABLED: 1
         run: |
-          # goreleaser's {{.Version}} strips the leading "v" from the tag —
-          # match that here since this build bypasses goreleaser entirely.
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Hardcoded, not the tag: cmd/desktop versions independently of the
+          # repo's shared tag - see .goreleaser.yaml's desktop build for why.
+          # Keep this in sync with that file's ldflags by hand.
+          VERSION="1.0.0"
           mkdir -p dist-desktop-macos
           GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o dist-desktop-macos/vkturn-desktop-darwin-amd64 ./cmd/desktop
           GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o dist-desktop-macos/vkturn-desktop-darwin-arm64 ./cmd/desktop

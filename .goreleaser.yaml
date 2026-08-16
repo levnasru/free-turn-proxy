@@ -81,8 +81,14 @@ builds:
     binary: vkturn-desktop
     flags:
       - -trimpath
+    # Hardcoded, not {{.Version}}: cmd/desktop versions independently of the
+    # repo's shared tag (client/server/etc still use {{.Version}}) - this is
+    # its first release, 1.0.0. Bump by hand here (and in release.yml's
+    # build-desktop-macos job) until it actually needs automated tracking -
+    # a separate release-please package is overkill for a value that hasn't
+    # changed yet.
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version=1.0.0
     env:
       - CGO_ENABLED=0
     targets:
