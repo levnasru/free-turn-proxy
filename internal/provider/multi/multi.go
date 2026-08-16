@@ -6,12 +6,18 @@ package multi
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 )
 
-// Provider распределяет 1-based streamID round-robin: провайдер = (streamID-1) % n,
-// внутренний streamID = ((streamID-1) / n) + 1 (биекция, без коллизий).
+// Provider распределяет 1-based streamID round-robin: базовый провайдер = (streamID-1) % n,
+// внутренний streamID = ((streamID-1) / n) + 1 (биекция, без коллизий) - пока
+// базовый провайдер живой. Если у него активен backoff (BackoffUntilUnix() в
+// будущем - hub недоступен/в фатальном auth-цикле), providerFor обходит
+// остальных по кругу и отдаёт первого живого; innerID при этом не пересчитывается
+// (не критично: реальные реализации, hub.Provider, не хранят состояние по
+// streamID для логики, только для логов).
 // Без изменяемого состояния - thread-safe.
 type Provider struct {
 	providers []provider.Provider
@@ -28,6 +34,14 @@ func New(providers []provider.Provider) *Provider {
 func (m *Provider) providerFor(streamID int) (provider.Provider, int) {
 	idx := (streamID - 1) % m.n
 	innerID := ((streamID - 1) / m.n) + 1
+	now := time.Now().Unix()
+	for i := 0; i < m.n; i++ {
+		cand := (idx + i) % m.n
+		if until := m.providers[cand].BackoffUntilUnix(); until == 0 || until < now {
+			return m.providers[cand], innerID
+		}
+	}
+	// все в backoff - возвращаем исходный, пусть ошибка всплывёт как обычно.
 	return m.providers[idx], innerID
 }
 

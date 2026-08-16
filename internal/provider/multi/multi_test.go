@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 )
@@ -113,6 +114,39 @@ func TestIsAuthErrorDelegatesToFirst(t *testing.T) {
 	fs[0].authResult = true
 	if !New(ps).IsAuthError(errors.New("x")) {
 		t.Fatal("IsAuthError should delegate to providers[0]")
+	}
+}
+
+func TestFailoverSkipsBackoffProvider(t *testing.T) {
+	ps, fs := newFakes(3)
+	fs[0].backoff = time.Now().Unix() + 1000 // мёртв
+	m := New(ps)
+
+	// streamID 1 -> idx 0 по формуле, но 0 в backoff -> должен уйти на idx 1.
+	creds, err := m.GetCredentials(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "p1-s1"; creds.User != want {
+		t.Fatalf("got %q, want %q (failover to provider 1)", creds.User, want)
+	}
+	if len(fs[0].gotCreds) != 0 {
+		t.Fatalf("provider 0 (backoff) should not have been called: %v", fs[0].gotCreds)
+	}
+}
+
+func TestFailoverAllDeadFallsBackToOriginal(t *testing.T) {
+	ps, fs := newFakes(2)
+	future := time.Now().Unix() + 1000
+	fs[0].backoff, fs[1].backoff = future, future
+	m := New(ps)
+
+	creds, err := m.GetCredentials(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "p0-s1"; creds.User != want {
+		t.Fatalf("all-dead fallback: got %q, want %q (original mapping)", creds.User, want)
 	}
 }
 
