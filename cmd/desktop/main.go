@@ -155,7 +155,7 @@ func runMode(cfg *DesktopConfig, mode string) {
 	case "vk-turn":
 		runVKTurnMode(ctx, cancel, dir, cfg)
 	case "xray":
-		runXraySubscriptionMode(ctx, dir, cfg)
+		runXraySubscriptionMode(ctx, cancel, dir, cfg)
 	}
 }
 
@@ -215,6 +215,9 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 	}
 	fmt.Printf("Прокси: socks5://%s — укажите его в браузере или приложении. Ctrl+C — остановить.\n", socksAddr)
 
+	startTray(ctx, cancel, "Подключено")
+	defer restoreConsole()
+
 	select {
 	case err := <-clientDone:
 		reportModeExit(ctx, "client", err)
@@ -227,7 +230,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 	}
 }
 
-func runXraySubscriptionMode(ctx context.Context, dir string, cfg *DesktopConfig) {
+func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
 	if cfg.XraySubscriptionURL == "" {
 		fmt.Fprintln(os.Stderr, "Нет xray-подписки для этого профиля")
 		return
@@ -272,6 +275,10 @@ func runXraySubscriptionMode(ctx context.Context, dir string, cfg *DesktopConfig
 		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
 		return
 	}
+
+	startTray(ctx, cancel, "Запущено")
+	defer restoreConsole()
+
 	if err := RunXray(ctx, xrayBin, configs[0], os.Stdout, os.Stderr); err != nil {
 		reportModeExit(ctx, "xray", err)
 	}
