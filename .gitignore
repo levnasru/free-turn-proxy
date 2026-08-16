@@ -20,6 +20,7 @@ client_config.json
 node_modules
 dist
 /mobile-dist/
+/desktop-macos-dist/
 .mcp.json
 .agentsroom/handoff-transcript-*.txt
 .agentsroom/handoff-summary-*.md
