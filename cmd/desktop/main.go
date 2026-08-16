@@ -119,6 +119,21 @@ func loginFlow() (*DesktopConfig, error) {
 	return cfg, nil
 }
 
+// promptXraySubscriptionURL asks for a subscription link when the portal
+// profile doesn't already have one cached (cfg.XraySubscriptionURL empty) —
+// the "нет плашки добавления" gap: previously this mode just dead-ended
+// with an error instead of offering any way to attach one. Saved into the
+// same local cache loginFlow writes to, so it only needs entering once.
+func promptXraySubscriptionURL() (string, error) {
+	fmt.Print("URL xray-подписки (Enter — пропустить): ")
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
 // reportModeExit prints the outcome of a subprocess that just exited. A
 // normal Ctrl+C / menu-driven stop cancels ctx and then kills the child,
 // so ctx.Err() != nil at that point means "we asked for this" — print a
@@ -232,8 +247,15 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 
 func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
 	if cfg.XraySubscriptionURL == "" {
-		fmt.Fprintln(os.Stderr, "Нет xray-подписки для этого профиля")
-		return
+		url, err := promptXraySubscriptionURL()
+		if err != nil || url == "" {
+			fmt.Fprintln(os.Stderr, "Нет xray-подписки для этого профиля")
+			return
+		}
+		cfg.XraySubscriptionURL = url
+		if err := SaveCache(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "Внимание: не удалось сохранить подписку в кеш:", err)
+		}
 	}
 
 	fetchCtx, fetchCancel := context.WithTimeout(ctx, 20*time.Second)
