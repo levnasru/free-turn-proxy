@@ -106,29 +106,6 @@ builds:
         env:
           - CGO_ENABLED=1
 
-  # cmd/desktop shells out to a separate `xray` binary (RunXray in
-  # launcher.go) - previously never published, forcing manual sourcing from
-  # upstream Xray-core (see resolveXrayBin's doc comment). Building it here
-  # from this repo's own pinned xtls/xray-core version keeps it in lockstep
-  # with whatever libxray-based config generation cmd/desktop uses, and it's
-  # pure Go (verified: cross-compiles clean for all 4 desktop targets, no
-  # CGO, no build tags - main/main.go already blank-imports
-  # main/distro/all, same as upstream's official build).
-  - id: xray-core
-    main: github.com/xtls/xray-core/main
-    binary: xray
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w
-    env:
-      - CGO_ENABLED=0
-    targets:
-      - windows_amd64
-      - linux_amd64
-      - darwin_amd64
-      - darwin_arm64
-
 archives:
   # Android: ship the .so binary directly (no archive wrapper), with
   # arch suffix so arm64 and arm coexist on the release page.
@@ -146,7 +123,6 @@ archives:
       - client
       - server
       - desktop
-      - xray-core
     formats: [binary]
     name_template: >-
       {{ .Binary }}-{{ .Os }}-{{ .Arch }}
@@ -211,6 +187,15 @@ release:
     - glob: mobile-dist/Mobile.xcframework.zip
     - glob: desktop-macos-dist/vkturn-desktop-darwin-amd64
     - glob: desktop-macos-dist/vkturn-desktop-darwin-arm64
+    # goreleaser's build.main is a filesystem path (stat-checked) - it can't
+    # build an external module's package (github.com/xtls/xray-core/main),
+    # only local ./cmd/* dirs. Built as a plain `go build` step instead (see
+    # release.yml's goreleaser job, "Build xray CLI" step) and attached the
+    # same way as the mobile/macOS-desktop artifacts above.
+    - glob: xray-dist/xray-linux-amd64
+    - glob: xray-dist/xray-windows-amd64.exe
+    - glob: xray-dist/xray-darwin-amd64
+    - glob: xray-dist/xray-darwin-arm64
 
 dockers_v2:
   - id: server

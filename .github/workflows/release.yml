@@ -162,6 +162,25 @@ jobs:
           name: desktop-macos-dist
           path: desktop-macos-dist/
 
+      # cmd/desktop shells out to a separate `xray` binary (RunXray in
+      # launcher.go) - previously never published, forcing manual sourcing
+      # from upstream Xray-core (see resolveXrayBin's doc comment). Built
+      # here from this repo's own pinned xtls/xray-core dependency to stay
+      # in lockstep with whatever libxray-based config generation cmd/desktop
+      # uses. Plain `go build`, not goreleaser's builds section: goreleaser's
+      # build.main is filesystem-path/stat-based and can't target an
+      # external module's package. Pure Go (no CGO, no build tags -
+      # xray-core's main.go already blank-imports main/distro/all, same as
+      # upstream's official build), so this cross-compiles all 4 targets
+      # from the ubuntu-latest runner directly.
+      - name: Build xray CLI
+        run: |
+          mkdir -p xray-dist
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-linux-amd64        github.com/xtls/xray-core/main
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-windows-amd64.exe github.com/xtls/xray-core/main
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-amd64      github.com/xtls/xray-core/main
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-arm64      github.com/xtls/xray-core/main
+
       - uses: goreleaser/goreleaser-action@v7.2.2
         with:
           distribution: goreleaser
