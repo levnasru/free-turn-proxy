@@ -320,6 +320,20 @@ func createSmuxSession(ctx context.Context, deps *Deps, params *Params, peer *ne
 	cleanupFns = append(cleanupFns, func() { _ = smuxSess.Close() })
 	deps.log().Debugf("smux session established")
 
+	// PermDead закрывается при блэкхоле TURN channel-bind (permwatch.go), тот же
+	// сигнал, что уже слушает udprelay. Здесь smux/KCP поверх аллокации не видят
+	// блэкхол сами - закрываем smux-сессию, чтобы maintainSession подхватил её
+	// как disconnected и реконнектнулся со свежими кредами, не дожидаясь (или не
+	// дождавшись вовсе) KeepAliveTimeout.
+	go func() {
+		select {
+		case <-smuxSess.CloseChan():
+		case <-stream.PermDead:
+			deps.log().Warnf("[session %d] TURN channel-bind умер - рецикл сессии", id)
+			_ = smuxSess.Close()
+		}
+	}()
+
 	return smuxSess, cleanup, nil
 }
 
