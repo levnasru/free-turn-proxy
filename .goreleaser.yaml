@@ -196,6 +196,10 @@ release:
     - glob: xray-dist/xray-windows-amd64.exe
     - glob: xray-dist/xray-darwin-amd64
     - glob: xray-dist/xray-darwin-arm64
+    # wintun.dll (TUN driver for xray-core's `tun` inbound, vk-turn (tun)
+    # mode on Windows) - fetched from upstream in release.yml's "Fetch
+    # wintun.dll" step, attached the same way as the artifacts above.
+    - glob: wintun-dist/wintun.dll
 
 dockers_v2:
   - id: server

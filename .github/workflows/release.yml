@@ -181,6 +181,19 @@ jobs:
           CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-amd64      github.com/xtls/xray-core/main
           CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-arm64      github.com/xtls/xray-core/main
 
+      # xray-core's `tun` inbound (used by vk-turn (tun) mode, see
+      # cmd/desktop/tun.go) needs wintun.dll next to xray.exe at runtime on
+      # Windows - it's the TUN driver, not something Go can statically link.
+      # Fetched from upstream (wintun.net) and pinned by hash rather than
+      # vendored, same reasoning as the xray CLI build above: stay off a
+      # binary blob in the repo, verify what actually ships.
+      - name: Fetch wintun.dll
+        run: |
+          mkdir -p wintun-dist
+          curl -fsSL -o /tmp/wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  /tmp/wintun.zip" | sha256sum -c -
+          unzip -p /tmp/wintun.zip wintun/bin/amd64/wintun.dll > wintun-dist/wintun.dll
+
       - uses: goreleaser/goreleaser-action@v7.2.2
         with:
           distribution: goreleaser
