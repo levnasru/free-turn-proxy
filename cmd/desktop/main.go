@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,7 +80,16 @@ var version = "dev"
 // loop forever either.
 const maxLoginAttempts = 3
 
+// tunElevated is set by relaunchElevated (elevate_linux.go/elevate_windows.go)
+// when re-execing this binary with a UAC/pkexec prompt already granted —
+// skips straight to vk-turn (tun) instead of showing the interactive menu
+// again in the elevated process.
+var tunElevated = flag.Bool("tun-elevated", false,
+	"внутренний флаг: пропустить меню, сразу поднять vk-turn (tun) (используется relaunchElevated)")
+
 func main() {
+	flag.Parse()
+
 	cfg, err := LoadCache()
 	if err != nil {
 		cfg, err = loginWithRetries()
@@ -89,15 +99,22 @@ func main() {
 		}
 	}
 
+	if *tunElevated {
+		runMode(cfg, "vk-turn-tun")
+		return
+	}
+
 	for {
-		choice, err := RunMenu([]string{"vk-turn", "xray-подписка", "обновить конфиг", "выход"})
+		choice, err := RunMenu([]string{"vk-turn (socks)", "vk-turn (tun)", "xray-подписка", "обновить конфиг", "выход"})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\nМеню прервано:", err)
 			return
 		}
 		switch choice {
-		case "vk-turn":
+		case "vk-turn (socks)":
 			runMode(cfg, "vk-turn")
+		case "vk-turn (tun)":
+			runMode(cfg, "vk-turn-tun")
 		case "xray-подписка":
 			runMode(cfg, "xray")
 		case "обновить конфиг":
@@ -213,6 +230,8 @@ func runMode(cfg *DesktopConfig, mode string) {
 	switch mode {
 	case "vk-turn":
 		runVKTurnMode(ctx, cancel, dir, cfg)
+	case "vk-turn-tun":
+		runVKTurnTunMode(ctx, cancel, dir, cfg)
 	case "xray":
 		runXraySubscriptionMode(ctx, cancel, dir, cfg)
 	}
