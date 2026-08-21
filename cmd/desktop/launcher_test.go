@@ -43,6 +43,48 @@ func TestBuildClientArgs(t *testing.T) {
 	}
 }
 
+func TestBuildClientArgsDebugMode(t *testing.T) {
+	orig := debugMode
+	debugMode = true
+	defer func() { debugMode = orig }()
+
+	cfg := &DesktopConfig{
+		HubURLs: []string{"https://x:8445/turn-creds"}, HubPin: "pin1", HubToken: "tok1",
+		Peer: "1.2.3.4:56000", ObfProfile: "rtpopus3", ObfKey: "key1", Streams: 8,
+	}
+	args, _ := buildClientArgs(cfg)
+	if args[len(args)-1] != "-debug" {
+		t.Fatalf("expected trailing -debug under debugMode, got %v", args)
+	}
+}
+
+func TestBuildVKTurnBridgeConfigLogLevel(t *testing.T) {
+	orig := debugMode
+	defer func() { debugMode = orig }()
+
+	var cfg struct {
+		Log struct {
+			LogLevel string `json:"loglevel"`
+		} `json:"log"`
+	}
+
+	debugMode = false
+	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig()), &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if cfg.Log.LogLevel != "warning" {
+		t.Fatalf("expected warning loglevel by default, got %q", cfg.Log.LogLevel)
+	}
+
+	debugMode = true
+	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig()), &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if cfg.Log.LogLevel != "debug" {
+		t.Fatalf("expected debug loglevel under debugMode, got %q", cfg.Log.LogLevel)
+	}
+}
+
 func TestBuildClientArgsMultipleHubURLs(t *testing.T) {
 	cfg := &DesktopConfig{
 		HubURLs: []string{"https://x:8445/turn-creds", "https://x:8446/turn-creds"},

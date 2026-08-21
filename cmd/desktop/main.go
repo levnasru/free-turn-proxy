@@ -19,10 +19,54 @@ import (
 
 var portalBaseURL = "https://lft.levnas.ru"
 
+// debugMode, when set via VKTURN_DEBUG, turns on verbose logging across every
+// spawned component (client gets -debug, the xray bridge gets loglevel=debug)
+// and duplicates all of their combined output into a log file the user can
+// hand back for troubleshooting, instead of relying on them to know to
+// redirect/tee the terminal themselves.
+var debugMode = false
+
 func init() {
 	if v := os.Getenv("VKTURN_PORTAL_URL"); v != "" {
 		portalBaseURL = v
 	}
+	if v := os.Getenv("VKTURN_DEBUG"); v != "" && v != "0" {
+		debugMode = true
+	}
+}
+
+// debugLogPath is where the debug log ends up when VKTURN_DEBUG is set —
+// same directory convention as CachePath's config.json.
+func debugLogPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".vkturn", "debug.log"), nil
+}
+
+// openOutputs returns the writers RunClient/RunXray should log to. Under
+// VKTURN_DEBUG it also appends everything to debugLogPath() (truncated fresh
+// each run, so it always holds just the latest attempt) via io.MultiWriter,
+// and returns a close func to flush it; without VKTURN_DEBUG it's a no-op
+// passthrough to stdout/stderr.
+func openOutputs() (stdout, stderr io.Writer, closeFn func(), err error) {
+	if !debugMode {
+		return os.Stdout, os.Stderr, func() {}, nil
+	}
+	path, perr := debugLogPath()
+	if perr != nil {
+		return nil, nil, nil, perr
+	}
+	if merr := os.MkdirAll(filepath.Dir(path), 0o700); merr != nil {
+		return nil, nil, nil, merr
+	}
+	f, oerr := os.Create(path)
+	if oerr != nil {
+		return nil, nil, nil, oerr
+	}
+	fmt.Println("VKTURN_DEBUG включён — подробный лог пишется в", path)
+	return io.MultiWriter(os.Stdout, f), io.MultiWriter(os.Stderr, f), func() { _ = f.Close() }, nil
 }
 
 // version is set via -ldflags "-X main.version=..." by the goreleaser
@@ -193,13 +237,27 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 		return
 	}
 
+	stdout, stderr, closeOutputs, err := openOutputs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Не удалось открыть debug-лог:", err)
+		return
+	}
+	defer closeOutputs()
+
 	clientDone := make(chan error, 1)
 	go func() {
-		clientDone <- RunClient(ctx, clientBin, cfg, os.Stdout, os.Stderr)
+		clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr)
 	}()
 
 	fmt.Println("Поднимаю туннель VK-TURN...")
-	if err := waitForListening(ctx, "127.0.0.1:9000", 5*time.Second); err != nil {
+	// clientListenTimeout покрывает реальный бюджет первой TURN-сессии:
+	// hub.go httpTimeout=15s (получение кредов) + dtlsdial HandshakeTimeout=30s
+	// для tcp+bond (cmd/client/main.go) — до этого client вообще не открывает
+	// -listen (см. tcpfwd.Run: Listen идёт только после pool.Ready(), т.е.
+	// после первой успешной сессии). 5s отваливался раньше, чем успевал
+	// пройти даже штатный первый коннект — не диагностика, а баг таймаута.
+	const clientListenTimeout = 60 * time.Second
+	if err := waitForListening(ctx, "127.0.0.1:9000", clientListenTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, "Туннель не поднялся:", err)
 		cancel()
 		<-clientDone
@@ -208,7 +266,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 
 	xrayDone := make(chan error, 1)
 	go func() {
-		xrayDone <- RunXray(ctx, xrayBin, buildVKTurnBridgeConfig(), os.Stdout, os.Stderr)
+		xrayDone <- RunXray(ctx, xrayBin, buildVKTurnBridgeConfig(), stdout, stderr)
 	}()
 
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", vkTurnLocalSocksPort)
@@ -298,10 +356,17 @@ func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, dir
 		return
 	}
 
+	stdout, stderr, closeOutputs, err := openOutputs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Не удалось открыть debug-лог:", err)
+		return
+	}
+	defer closeOutputs()
+
 	startTray(ctx, cancel, "Запущено")
 	defer restoreConsole()
 
-	if err := RunXray(ctx, xrayBin, configs[0], os.Stdout, os.Stderr); err != nil {
+	if err := RunXray(ctx, xrayBin, configs[0], stdout, stderr); err != nil {
 		reportModeExit(ctx, "xray", err)
 	}
 }

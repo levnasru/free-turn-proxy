@@ -43,6 +43,9 @@ func buildClientArgs(cfg *DesktopConfig) (args, env []string) {
 		"-n", strconv.Itoa(streams),
 		"-listen", "127.0.0.1:9000",
 	}
+	if debugMode {
+		args = append(args, "-debug")
+	}
 	env = []string{"VKTURN_HUB_TOKEN=" + cfg.HubToken}
 	return args, env
 }
@@ -163,7 +166,12 @@ const vkTurnIPCheckURL = "https://api.ipify.org"
 // UUID is validated server-side by the family's existing VPS Xray backend,
 // unrelated to and unchanged by this codebase).
 func buildVKTurnBridgeConfig() string {
+	logLevel := "warning"
+	if debugMode {
+		logLevel = "debug"
+	}
 	return fmt.Sprintf(`{
+  "log": { "loglevel": %q },
   "inbounds": [
     {
       "protocol": "socks",
@@ -190,7 +198,7 @@ func buildVKTurnBridgeConfig() string {
       "streamSettings": { "network": "tcp", "security": "none" }
     }
   ]
-}`, vkTurnLocalSocksPort, vkTurnBridgeUUID)
+}`, logLevel, vkTurnLocalSocksPort, vkTurnBridgeUUID)
 }
 
 // waitForListening polls addr with short-lived TCP dials until one succeeds
