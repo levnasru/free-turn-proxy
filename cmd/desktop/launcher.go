@@ -201,6 +201,62 @@ func buildVKTurnBridgeConfig() string {
 }`, logLevel, vkTurnLocalSocksPort, vkTurnBridgeUUID)
 }
 
+// vkTurnTunInterfaceName is the TUN adapter name xray creates for tun mode —
+// arbitrary on Windows/Linux (unlike macOS/FreeBSD, which require a
+// utunN/tunN naming scheme xray doesn't support here yet, see the spec's
+// "Не-цели").
+const vkTurnTunInterfaceName = "vkturn0"
+
+// buildVKTurnTunConfig is buildVKTurnBridgeConfig's tun-mode counterpart:
+// same vless outbound into the local client's bond listener on 127.0.0.1:9000,
+// but a tun inbound instead of socks. autoOutboundsInterface must be the real
+// physical uplink — without it xray's own outbound connections would route
+// back through the tun device it just created (see xray-core's proxy/tun
+// README, "CONSIDERATIONS" — the classic tun routing loop). routes is
+// publicRoutes()'s output: the public-internet complement of the private/LAN
+// CIDR list, so local devices stay reachable outside the tunnel.
+func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, error) {
+	logLevel := "warning"
+	if debugMode {
+		logLevel = "debug"
+	}
+	routesJSON, err := json.Marshal(routes)
+	if err != nil {
+		return "", fmt.Errorf("buildVKTurnTunConfig: marshal routes: %w", err)
+	}
+	return fmt.Sprintf(`{
+  "log": { "loglevel": %q },
+  "inbounds": [
+    {
+      "protocol": "tun",
+      "settings": {
+        "name": %q,
+        "mtu": 1500,
+        "autoOutboundsInterface": %q,
+        "autoSystemRoutingTable": %s
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "127.0.0.1",
+            "port": 9000,
+            "users": [
+              { "id": %q, "encryption": "none" }
+            ]
+          }
+        ]
+      },
+      "streamSettings": { "network": "tcp", "security": "none" }
+    }
+  ]
+}`, logLevel, vkTurnTunInterfaceName, physicalInterface, routesJSON, vkTurnBridgeUUID), nil
+}
+
 // waitForListening polls addr with short-lived TCP dials until one succeeds
 // or timeout elapses, so callers don't have to guess a fixed sleep for a
 // subprocess's listener startup time. Returns ctx.Err() immediately if ctx

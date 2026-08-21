@@ -307,3 +307,57 @@ func TestWaitForListeningRespectsContextCancellation(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
+
+func TestBuildVKTurnTunConfig(t *testing.T) {
+	routes := []string{"8.0.0.0/7", "11.0.0.0/8"}
+	raw, err := buildVKTurnTunConfig("eth0", routes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed struct {
+		Inbounds []struct {
+			Protocol string `json:"protocol"`
+			Settings struct {
+				Name                   string   `json:"name"`
+				AutoOutboundsInterface string   `json:"autoOutboundsInterface"`
+				AutoSystemRoutingTable []string `json:"autoSystemRoutingTable"`
+			} `json:"settings"`
+		} `json:"inbounds"`
+		Outbounds []struct {
+			Protocol string `json:"protocol"`
+			Settings struct {
+				Vnext []struct {
+					Users []struct {
+						ID string `json:"id"`
+					} `json:"users"`
+				} `json:"vnext"`
+			} `json:"settings"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("buildVKTurnTunConfig produced invalid JSON: %v\n%s", err, raw)
+	}
+
+	if len(parsed.Inbounds) != 1 || parsed.Inbounds[0].Protocol != "tun" {
+		t.Fatalf("expected exactly one tun inbound, got %+v", parsed.Inbounds)
+	}
+	in := parsed.Inbounds[0].Settings
+	if in.Name != vkTurnTunInterfaceName {
+		t.Errorf("interface name = %q, want %q", in.Name, vkTurnTunInterfaceName)
+	}
+	if in.AutoOutboundsInterface != "eth0" {
+		t.Errorf("autoOutboundsInterface = %q, want eth0", in.AutoOutboundsInterface)
+	}
+	if !reflect.DeepEqual(in.AutoSystemRoutingTable, routes) {
+		t.Errorf("autoSystemRoutingTable = %v, want %v", in.AutoSystemRoutingTable, routes)
+	}
+
+	if len(parsed.Outbounds) != 1 || parsed.Outbounds[0].Protocol != "vless" {
+		t.Fatalf("expected exactly one vless outbound, got %+v", parsed.Outbounds)
+	}
+	gotUUID := parsed.Outbounds[0].Settings.Vnext[0].Users[0].ID
+	if gotUUID != vkTurnBridgeUUID {
+		t.Errorf("vless user id = %q, want vkTurnBridgeUUID (%q)", gotUUID, vkTurnBridgeUUID)
+	}
+}
