@@ -447,10 +447,8 @@ func newAppDialer(dial dialFunc) net.Dialer {
 
 // udpDNSDial берёт первый достижимый UDP/53 резолвер из udpDNSServers.
 func udpDNSDial(ctx context.Context, _ string, _ string) (net.Conn, error) {
-	var (
-		d       net.Dialer
-		lastErr error
-	)
+	d := net.Dialer{Control: netctl.Apply}
+	var lastErr error
 	for _, s := range udpDNSServers() {
 		conn, err := d.DialContext(ctx, "udp", s)
 		if err == nil {
@@ -513,7 +511,8 @@ func udpProbe(timeout time.Duration) bool {
 		if remaining <= 0 {
 			break
 		}
-		conn, err := net.DialTimeout("udp", server, remaining) //nolint:noctx
+		d := &net.Dialer{Timeout: remaining, Control: netctl.Apply}
+		conn, err := d.Dial("udp", server)
 		if err != nil {
 			continue
 		}
