@@ -173,6 +173,13 @@ jobs:
       - name: Build client for desktop embed
         run: |
           mkdir -p cmd/desktop/embedded/linux_amd64 cmd/desktop/embedded/windows_amd64
+          # The committed placeholders at these exact paths (see
+          # cmd/desktop/embedded/README.md) are plain text, not Go objects -
+          # `go build -o` refuses to overwrite an existing file it doesn't
+          # recognize as its own prior output ("already exists and is not
+          # an object file"), so a fresh checkout's build would fail here
+          # without removing them first.
+          rm -f cmd/desktop/embedded/linux_amd64/client cmd/desktop/embedded/windows_amd64/client.exe
           CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/linux_amd64/client        ./cmd/client
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/windows_amd64/client.exe ./cmd/client
 
