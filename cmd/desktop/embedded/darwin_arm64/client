@@ -1,0 +1,3 @@
+placeholder for the `client` binary — overwritten by
+.github/workflows/release.yml before the real desktop build. See
+cmd/desktop/embedded/README.md. Do not execute this file.
