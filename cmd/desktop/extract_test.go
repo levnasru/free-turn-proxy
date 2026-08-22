@@ -114,6 +114,13 @@ func TestExtractIfChangedSweepsStaleTempFiles(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("orphaned partial write"), 0o755); err != nil {
 		t.Fatalf("seeding stale temp file: %v", err)
 	}
+	// Back-date past the sweep's 1-minute age guard (which exists to avoid
+	// deleting a concurrent second instance's in-flight temp file) — a
+	// freshly-written file here would otherwise look "in-flight" too.
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("backdating stale temp file: %v", err)
+	}
 
 	if err := extractIfChanged(path, []byte("fresh content"), 0o755); err != nil {
 		t.Fatalf("extract: %v", err)

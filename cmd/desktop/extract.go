@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 )
 
 // binDir returns ~/.vkturn/bin — where embedded client/xray/wintun.dll get
@@ -71,9 +72,17 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 	// killed between CreateTemp and Rename below) — these binaries are
 	// 15-80MB each, worth reclaiming. Best-effort: same tolerance as the
 	// sha256 sidecar self-healing above, a failed cleanup here isn't worth
-	// failing the extraction over.
+	// failing the extraction over. Skip anything modified in the last
+	// minute — a second vkturn-desktop instance starting concurrently
+	// (e.g. two family members' sessions on a shared machine) could be
+	// mid-write on its own temp file right now, and removing it out from
+	// under that instance's later os.Rename would fail that instance's
+	// startup for no reason.
 	if stale, globErr := filepath.Glob(filepath.Join(dir, filepath.Base(path)+".tmp-*")); globErr == nil {
 		for _, f := range stale {
+			if fi, statErr := os.Stat(f); statErr == nil && time.Since(fi.ModTime()) < time.Minute {
+				continue
+			}
 			_ = os.Remove(f)
 		}
 	}

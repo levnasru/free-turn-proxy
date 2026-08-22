@@ -19,6 +19,15 @@ type fakePacketConn struct {
 
 	entered chan struct{} // signaled (non-blocking send) on WriteTo entry, if set
 	hold    chan struct{} // WriteTo blocks reading this, if set, until closed
+
+	// closeCh mimics real net.Conn semantics: closing the connection
+	// unblocks a Write that's currently stuck in the kernel (the runtime
+	// poller wakes it with "use of closed network connection"). Without
+	// this, a test that blocks WriteTo on hold and never closes hold
+	// itself would have no way to simulate Close() being what unwedges
+	// the stuck write.
+	closeCh   chan struct{}
+	closeOnce sync.Once
 }
 
 type fakeWrite struct {
@@ -27,7 +36,7 @@ type fakeWrite struct {
 }
 
 func newFakePacketConn() *fakePacketConn {
-	return &fakePacketConn{}
+	return &fakePacketConn{closeCh: make(chan struct{})}
 }
 
 func (f *fakePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -38,7 +47,11 @@ func (f *fakePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		}
 	}
 	if f.hold != nil {
-		<-f.hold
+		select {
+		case <-f.hold:
+		case <-f.closeCh:
+			return 0, net.ErrClosed
+		}
 	}
 	b := make([]byte, len(p))
 	copy(b, p)
@@ -61,6 +74,7 @@ func (f *fakePacketConn) Close() error {
 	f.mu.Lock()
 	f.closed = true
 	f.mu.Unlock()
+	f.closeOnce.Do(func() { close(f.closeCh) })
 	return nil
 }
 func (f *fakePacketConn) LocalAddr() net.Addr              { return nil }
@@ -112,6 +126,7 @@ func TestNonBlockingPacketConn_QueueFullDropsSilently(t *testing.T) {
 	fake := &fakePacketConn{
 		entered: make(chan struct{}, 1),
 		hold:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	c := NewNonBlockingPacketConn(fake, 1) // capacity 1
 
@@ -217,6 +232,54 @@ func TestNonBlockingPacketConn_CloseDrainsQueuedPacket(t *testing.T) {
 	defer fake.mu.Unlock()
 	if len(fake.writes) != 1 || string(fake.writes[0].b) != "bye" {
 		t.Fatalf("underlying writes = %v, want [\"bye\"]", fake.writes)
+	}
+}
+
+// Proves Close() doesn't hang forever when loop() is stuck inside a
+// blocking underlying WriteTo (e.g. a blackholed TCP path with a full send
+// buffer and no write deadline set anywhere in the chain) — without this,
+// Close() would wait for the OS's full retry window (~15 minutes on
+// Linux's default tcp_retries2), which defeats PermDead-triggered
+// reconnect (tcpfwd's maintainSession calls Close synchronously before
+// reconnecting with fresh credentials).
+func TestNonBlockingPacketConn_CloseUnwedgesStuckWrite(t *testing.T) {
+	t.Parallel()
+	fake := &fakePacketConn{
+		entered: make(chan struct{}, 1),
+		hold:    make(chan struct{}), // never closed: simulates a permanently stuck write
+		closeCh: make(chan struct{}),
+	}
+	c := NewNonBlockingPacketConn(fake, 4)
+
+	if _, err := c.WriteTo([]byte("x"), &net.UDPAddr{Port: 1}); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	select {
+	case <-fake.entered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for loop() to enter the stuck underlying WriteTo")
+	}
+
+	closed := make(chan error, 1)
+	start := time.Now()
+	go func() { closed <- c.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Close took %v, want well under closeDrainTimeout+margin", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() hung on a stuck underlying WriteTo — closeDrainTimeout did not unwedge it")
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !fake.closed {
+		t.Fatal("underlying conn was never closed to unwedge the stuck write")
 	}
 }
 

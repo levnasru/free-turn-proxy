@@ -3,7 +3,13 @@ package netconn
 import (
 	"net"
 	"sync"
+	"time"
 )
+
+// closeDrainTimeout bounds how long Close waits for loop's in-flight
+// WriteTo to finish before forcing the underlying conn closed to unwedge
+// it. See Close's doc comment.
+const closeDrainTimeout = 200 * time.Millisecond
 
 // NonBlockingPacketConn wraps a net.PacketConn so WriteTo never blocks the
 // caller — critical for tunneling KCP over TCP, since KCP's update loop
@@ -82,6 +88,20 @@ func (c *NonBlockingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 
 func (c *NonBlockingPacketConn) Close() error {
 	c.closeOnce.Do(func() { close(c.done) })
-	<-c.stopped // wait for the drain to finish before the real conn closes
-	return c.PacketConn.Close()
+	select {
+	case <-c.stopped:
+		return c.PacketConn.Close()
+	case <-time.After(closeDrainTimeout):
+		// loop is stuck inside a blocking WriteTo on the underlying conn
+		// (e.g. a blackholed TCP path with a full send buffer — nothing
+		// in this chain sets a write deadline). Closing the real conn out
+		// from under it is what actually unblocks that write; otherwise
+		// Close can hang for the OS's full retry window (~15 minutes on
+		// Linux's default tcp_retries2), which defeats PermDead-triggered
+		// reconnect — tcpfwd's maintainSession calls Close synchronously
+		// before reconnecting with fresh credentials.
+		err := c.PacketConn.Close()
+		<-c.stopped // now unblocks fast: loop's remaining writes fail immediately on the closed conn
+		return err
+	}
 }
