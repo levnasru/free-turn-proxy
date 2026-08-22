@@ -20,7 +20,7 @@ import (
 // configuration needed. Requires admin/root, requested here (not earlier)
 // so picking any other menu item never triggers a UAC/pkexec prompt.
 func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
-	if err := checkEnvironment(true); err != nil {
+	if err := checkEnvironment(true, []int{vkTurnClientListenPort}); err != nil {
 		fmt.Fprintln(os.Stderr, "Ошибка запуска:", err)
 		return
 	}

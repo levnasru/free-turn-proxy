@@ -145,6 +145,11 @@ func convertSubscription(body string) ([]string, error) {
 // uses (see buildVKTurnBridgeConfig).
 const vkTurnLocalSocksPort = 1085
 
+// vkTurnClientListenPort is the raw TCP listener cmd/client opens
+// (-listen 127.0.0.1:<port>) that both the socks bridge's and the tun
+// config's vless outbound dial into.
+const vkTurnClientListenPort = 9000
+
 // vkTurnBridgeUUID is the VLESS user id the local xray bridge authenticates
 // with against cmd/client's raw TCP listener on 127.0.0.1:9000. It's the
 // exact UUID the manual onboarding kits (win-kit2, vkturn-linux-kit) already
