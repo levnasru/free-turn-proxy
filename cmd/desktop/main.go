@@ -238,6 +238,11 @@ func runMode(cfg *DesktopConfig, mode string) {
 // bridge, client's listener has nothing speaking VLESS to it and the user
 // has no usable proxy — see buildVKTurnBridgeConfig's doc comment.
 func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
+	if err := checkEnvironment(false); err != nil {
+		fmt.Fprintln(os.Stderr, "Ошибка запуска:", err)
+		return
+	}
+
 	clientBin, err := resolveClientBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден client:", err)

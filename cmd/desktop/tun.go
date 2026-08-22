@@ -20,6 +20,11 @@ import (
 // configuration needed. Requires admin/root, requested here (not earlier)
 // so picking any other menu item never triggers a UAC/pkexec prompt.
 func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
+	if err := checkEnvironment(true); err != nil {
+		fmt.Fprintln(os.Stderr, "Ошибка запуска:", err)
+		return
+	}
+
 	if !isElevated() {
 		if *tunElevated {
 			// Already went through one elevation attempt and still not
