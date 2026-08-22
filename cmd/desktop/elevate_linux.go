@@ -23,7 +23,24 @@ func relaunchElevated(extraArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("relaunchElevated: resolve self path: %w", err)
 	}
-	args := append([]string{self}, extraArgs...)
+	// pkexec sanitizes the environment (HOME -> /root, VKTURN_* dropped) —
+	// without explicitly forwarding these, the elevated child can't find the
+	// unprivileged user's cached config (CachePath reads $HOME/.vkturn/) and
+	// falls back to a second interactive portal login, and
+	// VKTURN_DEBUG/VKTURN_PORTAL_URL silently stop working right where
+	// debugging matters most.
+	envArgs := []string{"env"}
+	if home := os.Getenv("HOME"); home != "" {
+		envArgs = append(envArgs, "HOME="+home)
+	}
+	if v := os.Getenv("VKTURN_DEBUG"); v != "" {
+		envArgs = append(envArgs, "VKTURN_DEBUG="+v)
+	}
+	if v := os.Getenv("VKTURN_PORTAL_URL"); v != "" {
+		envArgs = append(envArgs, "VKTURN_PORTAL_URL="+v)
+	}
+	args := append(envArgs, self)
+	args = append(args, extraArgs...)
 	cmd := exec.Command("pkexec", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
