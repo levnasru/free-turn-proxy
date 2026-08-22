@@ -84,6 +84,15 @@ func main() {
 		})
 	}
 
+	// BindIface (desktop tun-mode) and ProtectPath (Android) are alternate
+	// host-protection mechanisms for the same problem on different
+	// platforms — only one is ever set by a given host launcher. If both
+	// were somehow set, this block runs after ProtectPath's and wins
+	// (netctl.SetControl just overwrites the process-global hook).
+	if cfg.Proxy.BindIface != "" {
+		netctl.SetControl(netctl.BindToInterface(cfg.Proxy.BindIface))
+	}
+
 	cfg.ClientID = resolveClientID(cfg.ClientID)
 
 	logger := logx.New(cfg.Log.Debug)

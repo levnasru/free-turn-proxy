@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -20,14 +21,32 @@ import (
 // so picking any other menu item never triggers a UAC/pkexec prompt.
 func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
 	if !isElevated() {
+		if *tunElevated {
+			// Already went through one elevation attempt and still not
+			// elevated — a real UAC/pkexec grant would have this process
+			// running as admin/root by now. Stop instead of relaunching
+			// again, which would otherwise chain into an unbounded sequence
+			// of prompts (see also the *tunElevated guard this mirrors).
+			fmt.Fprintln(os.Stderr, "Не удалось получить права администратора/root даже после запроса — прекращаю попытки.")
+			return
+		}
 		fmt.Println("Режиму 'vk-turn (tun)' нужны права администратора/root — запрашиваю...")
 		if err := relaunchElevated([]string{"-tun-elevated"}); err != nil {
 			fmt.Fprintln(os.Stderr, "Не удалось получить права:", err)
 			return
 		}
+		if runtime.GOOS == "windows" {
+			// Windows: relaunchElevated returns as soon as the elevated
+			// process is launched (fire-and-forget) — it's now running
+			// independently in its own console. Falling back to this
+			// process's menu would let the user start a second, conflicting
+			// session (e.g. vk-turn (socks)) fighting the elevated instance
+			// for 127.0.0.1:9000. Exit entirely instead.
+			fmt.Println("Запущен отдельный процесс с правами администратора.")
+			os.Exit(0)
+		}
 		// Linux: relaunchElevated already blocked until the elevated child
-		// finished — nothing left to do. Windows: the elevated process is
-		// now running independently — this (unprivileged) instance is done.
+		// finished — nothing left to do, return to the menu normally.
 		return
 	}
 
@@ -57,7 +76,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string
 	defer closeOutputs()
 
 	clientDone := make(chan error, 1)
-	go func() { clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr) }()
+	go func() { clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
 
 	fmt.Println("Поднимаю туннель VK-TURN...")
 	const clientListenTimeout = 60 * time.Second
@@ -102,7 +121,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string
 	} else {
 		fmt.Println("Подключено, выходной IP:", ip)
 	}
-	fmt.Println("Весь трафик машины теперь идёт через тоннель. Ctrl+C — остановить.")
+	fmt.Println("Весь трафик машины теперь идёт через туннель. Ctrl+C — остановить.")
 
 	startTray(ctx, cancel, "Подключено (tun)")
 	defer restoreConsole()
@@ -122,8 +141,8 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string
 // checkDirectConnectivity is checkVKTurnConnectivity's tun-mode counterpart:
 // tun mode has no local SOCKS port to dial through deliberately — the OS
 // itself now routes a plain HTTP client's connection through the tunnel, so
-// this just uses http.DefaultClient's normal dial path instead of a SOCKS5
-// dialer.
+// this just uses a bare *http.Client with a timeout instead of a SOCKS5
+// dialer (no custom Transport/DialContext needed).
 func checkDirectConnectivity(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vkTurnIPCheckURL, nil)
 	if err != nil {

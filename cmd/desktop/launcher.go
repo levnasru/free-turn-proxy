@@ -55,8 +55,9 @@ func buildClientArgs(cfg *DesktopConfig) (args, env []string) {
 // canceled or the process exits. Canceling ctx sends the process a kill via
 // exec.CommandContext's standard behavior — matches how the menu's "exit"
 // path stops whichever mode is running.
-func RunClient(ctx context.Context, clientBinPath string, cfg *DesktopConfig, stdout, stderr io.Writer) error {
+func RunClient(ctx context.Context, clientBinPath string, cfg *DesktopConfig, stdout, stderr io.Writer, extraArgs ...string) error {
 	args, env := buildClientArgs(cfg)
+	args = append(args, extraArgs...)
 	cmd := exec.CommandContext(ctx, clientBinPath, args...)
 	// cmd.Env starts nil; appending onto nil (instead of os.Environ()) would
 	// replace the child's entire environment with just VKTURN_HUB_TOKEN,

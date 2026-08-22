@@ -77,6 +77,7 @@ type ProxyOpts struct {
 	Connect     string    // -connect: backend (только сервер)
 	Peer        string    // -peer: адрес серверного прокси, куда дозванивается клиент (только клиент)
 	ProtectPath string    // -protect-path: путь к Unix socket (SCM_RIGHTS) для защиты FDs от VPN
+	BindIface   string    // -bind-iface: имя физического интерфейса для SO_BINDTODEVICE/IP_UNICAST_IF (desktop tun-режим, альтернатива -protect-path)
 }
 
 // Platform выбирает класс устройства персоны (мобильность UA/device/client hints).
@@ -240,6 +241,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	clientID := fs.String("client-id", "", "уникальный ID клиента (автогенерация если не задан)")
 	subURL := fs.String("sub", "", "URL подписки (sub.md) для получения списка серверов")
 	protectPath := fs.String("protect-path", "", "путь к Unix socket для SCM_RIGHTS (VPN protect)")
+	bindIface := fs.String("bind-iface", "", "имя физического сетевого интерфейса для привязки исходящих сокетов (desktop tun-режим, альтернатива -protect-path)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -262,6 +264,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 			Listen:      *listen,
 			Peer:        *peer,
 			ProtectPath: *protectPath,
+			BindIface:   *bindIface,
 		},
 		Provider: ProviderOpts{
 			Name: *provider,
