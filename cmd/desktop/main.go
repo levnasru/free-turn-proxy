@@ -62,10 +62,12 @@ func openOutputs() (stdout, stderr io.Writer, closeFn func(), err error) {
 	if merr := os.MkdirAll(filepath.Dir(path), 0o700); merr != nil {
 		return nil, nil, nil, merr
 	}
+	chownToOriginalUserIfElevated(filepath.Dir(path))
 	f, oerr := os.Create(path)
 	if oerr != nil {
 		return nil, nil, nil, oerr
 	}
+	chownToOriginalUserIfElevated(path)
 	fmt.Println("VKTURN_DEBUG включён — подробный лог пишется в", path)
 	return io.MultiWriter(os.Stdout, f), io.MultiWriter(os.Stderr, f), func() { _ = f.Close() }, nil
 }
