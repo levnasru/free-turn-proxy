@@ -85,7 +85,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 
 	fmt.Println("Поднимаю туннель VK-TURN...")
 	const clientListenTimeout = 60 * time.Second
-	if err := waitForListening(ctx, "127.0.0.1:9000", clientListenTimeout); err != nil {
+	if err := waitForListening(ctx, fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort), clientListenTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, "Туннель не поднялся:", err)
 		cancel()
 		<-clientDone

@@ -41,7 +41,7 @@ func buildClientArgs(cfg *DesktopConfig) (args, env []string) {
 		"-obf-profile", cfg.ObfProfile,
 		"-obf-key", cfg.ObfKey,
 		"-n", strconv.Itoa(streams),
-		"-listen", "127.0.0.1:9000",
+		"-listen", fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort),
 	}
 	if debugMode {
 		args = append(args, "-debug")
@@ -194,7 +194,7 @@ func buildVKTurnBridgeConfig() string {
         "vnext": [
           {
             "address": "127.0.0.1",
-            "port": 9000,
+            "port": %d,
             "users": [
               { "id": %q, "encryption": "none" }
             ]
@@ -204,7 +204,7 @@ func buildVKTurnBridgeConfig() string {
       "streamSettings": { "network": "tcp", "security": "none" }
     }
   ]
-}`, logLevel, vkTurnLocalSocksPort, vkTurnBridgeUUID)
+}`, logLevel, vkTurnLocalSocksPort, vkTurnClientListenPort, vkTurnBridgeUUID)
 }
 
 // vkTurnTunInterfaceName is the TUN adapter name xray creates for tun mode —
@@ -250,7 +250,7 @@ func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, er
         "vnext": [
           {
             "address": "127.0.0.1",
-            "port": 9000,
+            "port": %d,
             "users": [
               { "id": %q, "encryption": "none" }
             ]
@@ -260,7 +260,7 @@ func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, er
       "streamSettings": { "network": "tcp", "security": "none" }
     }
   ]
-}`, logLevel, vkTurnTunInterfaceName, physicalInterface, routesJSON, vkTurnBridgeUUID), nil
+}`, logLevel, vkTurnTunInterfaceName, physicalInterface, routesJSON, vkTurnClientListenPort, vkTurnBridgeUUID), nil
 }
 
 // waitForListening polls addr with short-lived TCP dials until one succeeds

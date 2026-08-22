@@ -274,7 +274,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopC
 	// после первой успешной сессии). 5s отваливался раньше, чем успевал
 	// пройти даже штатный первый коннект — не диагностика, а баг таймаута.
 	const clientListenTimeout = 60 * time.Second
-	if err := waitForListening(ctx, "127.0.0.1:9000", clientListenTimeout); err != nil {
+	if err := waitForListening(ctx, fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort), clientListenTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, "Туннель не поднялся:", err)
 		cancel()
 		<-clientDone
