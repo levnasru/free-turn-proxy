@@ -67,6 +67,17 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 	chownToOriginalUserIfElevated(parentDir)
 	chownToOriginalUserIfElevated(dir)
 
+	// Sweep any orphaned temp files a previous run left behind (process
+	// killed between CreateTemp and Rename below) — these binaries are
+	// 15-80MB each, worth reclaiming. Best-effort: same tolerance as the
+	// sha256 sidecar self-healing above, a failed cleanup here isn't worth
+	// failing the extraction over.
+	if stale, globErr := filepath.Glob(filepath.Join(dir, filepath.Base(path)+".tmp-*")); globErr == nil {
+		for _, f := range stale {
+			_ = os.Remove(f)
+		}
+	}
+
 	// Write to a temp file in the same directory, then rename over the
 	// target. Same-directory is required for os.Rename to be a same-filesystem
 	// atomic rename rather than a cross-filesystem copy+delete. This also
@@ -123,7 +134,13 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 // would need os/user (cgo-gated on some platforms) for a directory that's
 // private (0o700) and only this app reads/writes, not worth the added
 // dependency surface for that gap. Fix if this project ever needs a
-// non-standard group scheme.
+// non-standard group scheme. Callers now reach beyond the bin/ dir this
+// was originally written for — the pre-existing ~/.vkturn parent
+// (config.json, debug.log) gets chowned too — which widens the same
+// ceiling to more files: on a distro where uid != primary gid (openSUSE's
+// shared "users" group, LDAP/AD-backed accounts) those files end up in
+// the wrong group, still harmless at 0700 since only the owner can read
+// them anyway, but worth naming now that it's not just one private dir.
 func chownToOriginalUserIfElevated(path string) {
 	if os.Geteuid() != 0 {
 		return

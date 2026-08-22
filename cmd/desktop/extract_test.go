@@ -103,3 +103,23 @@ func TestExtractIfChangedRewritesWhenFileMissingButSidecarPresent(t *testing.T) 
 		t.Fatalf("expected file to be recreated, stat error: %v", err)
 	}
 }
+
+func TestExtractIfChangedSweepsStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client")
+
+	// Simulate a prior run killed between CreateTemp and Rename: an
+	// orphaned <name>.tmp-* file left behind.
+	stale := filepath.Join(dir, "client.tmp-oldcrash123")
+	if err := os.WriteFile(stale, []byte("orphaned partial write"), 0o755); err != nil {
+		t.Fatalf("seeding stale temp file: %v", err)
+	}
+
+	if err := extractIfChanged(path, []byte("fresh content"), 0o755); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file was not swept, stat err = %v", err)
+	}
+}
