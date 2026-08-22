@@ -3,7 +3,10 @@
 
 package main
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
 // errTunNotSupportedDarwin is returned by relaunchElevated on macOS — vk-turn
 // (tun) needs a real elevation-prompt equivalent (AuthorizationExecuteWithPrivileges
@@ -18,7 +21,7 @@ var errTunNotSupportedDarwin = errors.New("vk-turn (tun) пока не подд�
 // keeping the same shape as elevate_linux.go avoids a third, differently-behaved
 // implementation for no reason.
 func isElevated() bool {
-	return false
+	return os.Geteuid() == 0
 }
 
 // relaunchElevated always fails on macOS — see errTunNotSupportedDarwin.

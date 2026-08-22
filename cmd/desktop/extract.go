@@ -59,9 +59,12 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 	}
 
 	dir := filepath.Dir(path)
+	parentDir := filepath.Dir(dir) // ~/.vkturn
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("extractIfChanged: mkdir %s: %w", dir, err)
 	}
+	// Chown both the bin dir and its parent (~/.vkturn) so we don't lock out the normal user
+	chownToOriginalUserIfElevated(parentDir)
 	chownToOriginalUserIfElevated(dir)
 
 	// Write to a temp file in the same directory, then rename over the
@@ -77,21 +80,19 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("extractIfChanged: create temp file in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		os.Remove(tmpPath)
 		return fmt.Errorf("extractIfChanged: write temp file %s: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("extractIfChanged: close temp file %s: %w", tmpPath, err)
 	}
 	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("extractIfChanged: chmod temp file %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("extractIfChanged: rename %s to %s: %w", tmpPath, path, err)
 	}
 	chownToOriginalUserIfElevated(path)

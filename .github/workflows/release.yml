@@ -63,7 +63,7 @@ jobs:
       - name: Build client+xray for desktop embed (macOS)
         run: |
           mkdir -p cmd/desktop/embedded/darwin_amd64 cmd/desktop/embedded/darwin_arm64
-          rm -f cmd/desktop/embedded/darwin_amd64/client cmd/desktop/embedded/darwin_arm64/client
+          rm -f cmd/desktop/embedded/darwin_amd64/client cmd/desktop/embedded/darwin_arm64/client cmd/desktop/embedded/darwin_amd64/xray cmd/desktop/embedded/darwin_arm64/xray
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/darwin_amd64/client ./cmd/client
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/darwin_arm64/client ./cmd/client
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o cmd/desktop/embedded/darwin_amd64/xray github.com/xtls/xray-core/main
