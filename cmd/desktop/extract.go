@@ -64,8 +64,35 @@ func extractIfChanged(path string, data []byte, perm os.FileMode) error {
 	}
 	chownToOriginalUserIfElevated(dir)
 
-	if err := os.WriteFile(path, data, perm); err != nil {
-		return fmt.Errorf("extractIfChanged: write %s: %w", path, err)
+	// Write to a temp file in the same directory, then rename over the
+	// target. Same-directory is required for os.Rename to be a same-filesystem
+	// atomic rename rather than a cross-filesystem copy+delete. This also
+	// fixes a real failure mode, not just a theoretical one: writing directly
+	// to `path` in place fails with ETXTBSY ("text file busy") if an older
+	// running instance still has that exact file open for execution (e.g. an
+	// in-progress upgrade) — rename swaps the directory entry instead of
+	// touching the inode the running process already has open.
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("extractIfChanged: create temp file in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("extractIfChanged: write temp file %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("extractIfChanged: close temp file %s: %w", tmpPath, err)
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("extractIfChanged: chmod temp file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("extractIfChanged: rename %s to %s: %w", tmpPath, path, err)
 	}
 	chownToOriginalUserIfElevated(path)
 
