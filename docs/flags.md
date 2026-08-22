@@ -52,7 +52,7 @@
 - На Windows рядом с `vkturn-desktop.exe`/`client-windows-amd64.exe`/
   `xray-windows-amd64.exe` должен лежать `wintun.dll` (драйвер TUN,
   без него xray не сможет поднять интерфейс) — публикуется как отдельный
-  ассет релиза (`wintun-dist/wintun.dll`), кладите рядом при сборке кита.
+  ассет релиза (`wintun.dll`), кладите рядом при сборке кита.
   На Linux `wintun.dll` не нужен.
 - macOS пока не поддерживается — только Windows и Linux.
 
