@@ -106,8 +106,14 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 		// Рез внутри STUN magic cookie (байты 4-7) рвёт DPI-матч на cookie.
 		// Offset рандомен в [5,7] - убирает статический фингерпринт фикс-offset.
 		wrapped := &netconn.SplitFirstWriteConn{Conn: c, SplitAt: 5 + randx.Intn(3), Delay: 20 * time.Millisecond}
-		turnConn = netconn.NewNonBlockingPacketConn(turn.NewSTUNConn(wrapped), 512)
-		closeConn = c.Close
+		nbConn := netconn.NewNonBlockingPacketConn(turn.NewSTUNConn(wrapped), 512)
+		turnConn = nbConn
+		// Close through the wrapper, not the raw conn: NonBlockingPacketConn.Close
+		// drains whatever's still queued (e.g. the delete-allocation Refresh
+		// below) before closing the real socket underneath it, and also stops
+		// its own background goroutine — closing the raw conn directly bypassed
+		// both.
+		closeConn = nbConn.Close
 	}
 
 	var addrFamily turn.RequestedAddressFamily
