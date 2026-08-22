@@ -106,7 +106,7 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 		// Рез внутри STUN magic cookie (байты 4-7) рвёт DPI-матч на cookie.
 		// Offset рандомен в [5,7] - убирает статический фингерпринт фикс-offset.
 		wrapped := &netconn.SplitFirstWriteConn{Conn: c, SplitAt: 5 + randx.Intn(3), Delay: 20 * time.Millisecond}
-		turnConn = turn.NewSTUNConn(wrapped)
+		turnConn = netconn.NewNonBlockingPacketConn(turn.NewSTUNConn(wrapped), 512)
 		closeConn = c.Close
 	}
 
