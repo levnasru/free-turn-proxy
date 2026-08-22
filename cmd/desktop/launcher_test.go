@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +284,70 @@ func TestBuildVKTurnTunConfig(t *testing.T) {
 	gotUUID := parsed.Outbounds[0].Settings.Vnext[0].Users[0].ID
 	if gotUUID != vkTurnBridgeUUID {
 		t.Errorf("vless user id = %q, want vkTurnBridgeUUID (%q)", gotUUID, vkTurnBridgeUUID)
+	}
+}
+
+// TestResolveClientBinWritesEmbeddedBytes guards against a copy-paste swap of
+// embeddedClient/embeddedXray between resolveClientBin and resolveXrayBin:
+// extract_test.go (Task 1) only tests extractIfChanged in isolation, so
+// nothing previously checked that resolveClientBin actually wires
+// embeddedClient (not embeddedXray) into it. HOME is redirected to a fresh
+// t.TempDir() so binDir() (~/.vkturn/bin, see extract.go) resolves inside the
+// isolated dir instead of the real user's home.
+func TestResolveClientBinWritesEmbeddedBytes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	origClient := embeddedClient
+	embeddedClient = []byte("test-client-payload-embeddedClient")
+	defer func() { embeddedClient = origClient }()
+
+	path, err := resolveClientBin()
+	if err != nil {
+		t.Fatalf("resolveClientBin: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading extracted client binary at %s: %v", path, err)
+	}
+	if string(got) != string(embeddedClient) {
+		t.Fatalf("extracted client bytes = %q, want %q", got, embeddedClient)
+	}
+}
+
+// TestResolveXrayBinWritesEmbeddedBytesAndSkipsWintunOnLinux is
+// resolveXrayBin's counterpart to TestResolveClientBinWritesEmbeddedBytes,
+// and additionally checks that on non-Windows it does not write wintun.dll
+// into binDir() (resolveXrayBin only extracts it under runtime.GOOS ==
+// "windows" — see launcher.go).
+func TestResolveXrayBinWritesEmbeddedBytesAndSkipsWintunOnLinux(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	origXray := embeddedXray
+	embeddedXray = []byte("test-xray-payload-embeddedXray")
+	defer func() { embeddedXray = origXray }()
+
+	path, err := resolveXrayBin()
+	if err != nil {
+		t.Fatalf("resolveXrayBin: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading extracted xray binary at %s: %v", path, err)
+	}
+	if string(got) != string(embeddedXray) {
+		t.Fatalf("extracted xray bytes = %q, want %q", got, embeddedXray)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir, err := binDir()
+	if err != nil {
+		t.Fatalf("binDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "wintun.dll")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no wintun.dll written on non-Windows, stat err = %v", statErr)
 	}
 }
