@@ -220,6 +220,20 @@ jobs:
           unzip -p /tmp/wintun.zip wintun/bin/amd64/wintun.dll > wintun-dist/wintun.dll
           cp wintun-dist/wintun.dll cmd/desktop/embedded/windows_amd64/wintun.dll
 
+      - name: Mark desktop-embed placeholders as intentionally overwritten
+        run: |
+          # goreleaser's release pipe aborts on a dirty git tree; these five
+          # tracked placeholders (see cmd/desktop/embedded/README.md) are
+          # *supposed* to be overwritten by the population steps above.
+          # --skip-worktree hides the local modification from `git status`
+          # without touching the working file goreleaser's `go build` reads.
+          git update-index --skip-worktree \
+            cmd/desktop/embedded/linux_amd64/client \
+            cmd/desktop/embedded/linux_amd64/xray \
+            cmd/desktop/embedded/windows_amd64/client.exe \
+            cmd/desktop/embedded/windows_amd64/xray.exe \
+            cmd/desktop/embedded/windows_amd64/wintun.dll
+
       - uses: goreleaser/goreleaser-action@v7.2.2
         with:
           distribution: goreleaser
