@@ -191,15 +191,14 @@ release:
     # build an external module's package (github.com/xtls/xray-core/main),
     # only local ./cmd/* dirs. Built as a plain `go build` step instead (see
     # release.yml's goreleaser job, "Build xray CLI" step) and attached the
-    # same way as the mobile/macOS-desktop artifacts above.
-    - glob: xray-dist/xray-linux-amd64
-    - glob: xray-dist/xray-windows-amd64.exe
+    # same way as the mobile/macOS-desktop artifacts above. linux_amd64 and
+    # windows_amd64 aren't listed here anymore - cmd/desktop now embeds them
+    # directly (go:embed, see cmd/desktop/embed_linux.go/embed_windows.go)
+    # instead of shipping them as loose release assets; only the macOS
+    # builds (out of scope for desktop embedding) still need a standalone
+    # download.
     - glob: xray-dist/xray-darwin-amd64
     - glob: xray-dist/xray-darwin-arm64
-    # wintun.dll (TUN driver for xray-core's `tun` inbound, vk-turn (tun)
-    # mode on Windows) - fetched from upstream in release.yml's "Fetch
-    # wintun.dll" step, attached the same way as the artifacts above.
-    - glob: wintun-dist/wintun.dll
 
 dockers_v2:
   - id: server

@@ -162,6 +162,20 @@ jobs:
           name: desktop-macos-dist
           path: desktop-macos-dist/
 
+      # cmd/desktop embeds client/xray/wintun.dll via go:embed (see
+      # cmd/desktop/embed_linux.go, embed_windows.go, extract.go) and
+      # extracts them to ~/.vkturn/bin/ on first run - so the payload has
+      # to exist under cmd/desktop/embedded/<goos>_<goarch>/ before
+      # goreleaser's own `go build ./cmd/desktop` below runs, or it embeds
+      # empty placeholders. This step populates the `client` half; the
+      # "Build xray CLI" and "Fetch wintun.dll" steps below populate the
+      # rest.
+      - name: Build client for desktop embed
+        run: |
+          mkdir -p cmd/desktop/embedded/linux_amd64 cmd/desktop/embedded/windows_amd64
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/linux_amd64/client        ./cmd/client
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/windows_amd64/client.exe ./cmd/client
+
       # cmd/desktop shells out to a separate `xray` binary (RunXray in
       # launcher.go) - previously never published, forcing manual sourcing
       # from upstream Xray-core (see resolveXrayBin's doc comment). Built
@@ -172,7 +186,9 @@ jobs:
       # external module's package. Pure Go (no CGO, no build tags -
       # xray-core's main.go already blank-imports main/distro/all, same as
       # upstream's official build), so this cross-compiles all 4 targets
-      # from the ubuntu-latest runner directly.
+      # from the ubuntu-latest runner directly. Also copies the two targets
+      # cmd/desktop embeds into cmd/desktop/embedded/ (see the "Build client
+      # for desktop embed" step above).
       - name: Build xray CLI
         run: |
           mkdir -p xray-dist
@@ -180,6 +196,8 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-windows-amd64.exe github.com/xtls/xray-core/main
           CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-amd64      github.com/xtls/xray-core/main
           CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-arm64      github.com/xtls/xray-core/main
+          cp xray-dist/xray-linux-amd64        cmd/desktop/embedded/linux_amd64/xray
+          cp xray-dist/xray-windows-amd64.exe  cmd/desktop/embedded/windows_amd64/xray.exe
 
       # xray-core's `tun` inbound (used by vk-turn (tun) mode, see
       # cmd/desktop/tun.go) needs wintun.dll next to xray.exe at runtime on
@@ -193,6 +211,7 @@ jobs:
           curl -fsSL -o /tmp/wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
           echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  /tmp/wintun.zip" | sha256sum -c -
           unzip -p /tmp/wintun.zip wintun/bin/amd64/wintun.dll > wintun-dist/wintun.dll
+          cp wintun-dist/wintun.dll cmd/desktop/embedded/windows_amd64/wintun.dll
 
       - uses: goreleaser/goreleaser-action@v7.2.2
         with:
