@@ -213,13 +213,6 @@ func reportModeExit(ctx context.Context, label string, err error) {
 }
 
 func runMode(cfg *DesktopConfig, mode string) {
-	exePath, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Не удалось определить путь к исполняемому файлу:", err)
-		return
-	}
-	dir := filepath.Dir(exePath)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
@@ -229,11 +222,11 @@ func runMode(cfg *DesktopConfig, mode string) {
 
 	switch mode {
 	case "vk-turn":
-		runVKTurnMode(ctx, cancel, dir, cfg)
+		runVKTurnMode(ctx, cancel, cfg)
 	case "vk-turn-tun":
-		runVKTurnTunMode(ctx, cancel, dir, cfg)
+		runVKTurnTunMode(ctx, cancel, cfg)
 	case "xray":
-		runXraySubscriptionMode(ctx, cancel, dir, cfg)
+		runXraySubscriptionMode(ctx, cancel, cfg)
 	}
 }
 
@@ -244,13 +237,13 @@ func runMode(cfg *DesktopConfig, mode string) {
 // through it before telling the user they're connected. Without the
 // bridge, client's listener has nothing speaking VLESS to it and the user
 // has no usable proxy — see buildVKTurnBridgeConfig's doc comment.
-func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
-	clientBin, err := resolveClientBin(dir)
+func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
+	clientBin, err := resolveClientBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден client:", err)
 		return
 	}
-	xrayBin, err := resolveXrayBin(dir)
+	xrayBin, err := resolveXrayBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
 		return
@@ -322,7 +315,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, dir string, c
 	}
 }
 
-func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
+func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
 	if cfg.XraySubscriptionURL == "" {
 		url, err := promptXraySubscriptionURL()
 		if err != nil || url == "" {
@@ -369,7 +362,7 @@ func runXraySubscriptionMode(ctx context.Context, cancel context.CancelFunc, dir
 	}
 	fmt.Printf("Выбран конфиг 1 из %d.\n", len(configs))
 
-	xrayBin, err := resolveXrayBin(dir)
+	xrayBin, err := resolveXrayBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
 		return

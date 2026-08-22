@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -185,81 +182,6 @@ func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
 	}
 	if len(vnext[0].Users) != 1 || vnext[0].Users[0].ID != vkTurnBridgeUUID {
 		t.Fatalf("unexpected users: %+v", vnext[0].Users)
-	}
-}
-
-func TestResolveBinPrefersVersionedOverBare(t *testing.T) {
-	dir := t.TempDir()
-	exeSuffix := ""
-	if runtime.GOOS == "windows" {
-		exeSuffix = ".exe"
-	}
-	versioned := filepath.Join(dir, "client-"+runtime.GOOS+"-"+runtime.GOARCH+exeSuffix)
-	bare := filepath.Join(dir, "client"+exeSuffix)
-	mustWriteExecutable(t, versioned)
-	mustWriteExecutable(t, bare)
-
-	got, err := resolveBin(dir, "client")
-	if err != nil {
-		t.Fatalf("resolveBin: %v", err)
-	}
-	if got != versioned {
-		t.Fatalf("expected versioned path %q, got %q", versioned, got)
-	}
-}
-
-func TestResolveBinFallsBackToBare(t *testing.T) {
-	dir := t.TempDir()
-	exeSuffix := ""
-	if runtime.GOOS == "windows" {
-		exeSuffix = ".exe"
-	}
-	bare := filepath.Join(dir, "client"+exeSuffix)
-	mustWriteExecutable(t, bare)
-
-	got, err := resolveBin(dir, "client")
-	if err != nil {
-		t.Fatalf("resolveBin: %v", err)
-	}
-	if got != bare {
-		t.Fatalf("expected bare path %q, got %q", bare, got)
-	}
-}
-
-func TestResolveBinFallsBackToPath(t *testing.T) {
-	dir := t.TempDir() // nothing here — forces the PATH fallback
-	pathDir := t.TempDir()
-	exeSuffix := ""
-	if runtime.GOOS == "windows" {
-		exeSuffix = ".exe"
-	}
-	onPath := filepath.Join(pathDir, "client"+exeSuffix)
-	mustWriteExecutable(t, onPath)
-	t.Setenv("PATH", pathDir)
-
-	got, err := resolveBin(dir, "client")
-	if err != nil {
-		t.Fatalf("resolveBin: %v", err)
-	}
-	if got != onPath {
-		t.Fatalf("expected PATH fallback %q, got %q", onPath, got)
-	}
-}
-
-func TestResolveBinErrorsWhenNotFoundAnywhere(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", t.TempDir()) // empty PATH dir — nothing to find
-
-	_, err := resolveBin(dir, "client")
-	if err == nil {
-		t.Fatal("expected error when client isn't found anywhere")
-	}
-}
-
-func mustWriteExecutable(t *testing.T, path string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write %s: %v", path, err)
 	}
 }
 

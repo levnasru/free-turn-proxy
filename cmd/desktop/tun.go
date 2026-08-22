@@ -19,7 +19,7 @@ import (
 // exclusion list from lanexclude.go) through xray — no per-app proxy
 // configuration needed. Requires admin/root, requested here (not earlier)
 // so picking any other menu item never triggers a UAC/pkexec prompt.
-func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string, cfg *DesktopConfig) {
+func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
 	if !isElevated() {
 		if *tunElevated {
 			// Already went through one elevation attempt and still not
@@ -57,12 +57,12 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, dir string
 	}
 	routes := publicRoutes()
 
-	clientBin, err := resolveClientBin(dir)
+	clientBin, err := resolveClientBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден client:", err)
 		return
 	}
-	xrayBin, err := resolveXrayBin(dir)
+	xrayBin, err := resolveXrayBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
 		return

@@ -347,48 +347,39 @@ func RunXray(ctx context.Context, xrayBinPath, xrayJSON string, stdout, stderr i
 	return cmd.Run()
 }
 
-// resolveClientBin locates the `client` binary near the running
-// vkturn-desktop executable. See resolveBin for the search order.
-func resolveClientBin(dir string) (string, error) {
-	return resolveBin(dir, "client")
+// resolveClientBin extracts the embedded client binary to binDir()
+// (skipping the write when unchanged — see extractIfChanged) and returns
+// its path for RunClient to exec.
+func resolveClientBin() (string, error) {
+	dir, err := binDir()
+	if err != nil {
+		return "", fmt.Errorf("resolveClientBin: %w", err)
+	}
+	path := filepath.Join(dir, "client"+exeSuffix())
+	if err := extractIfChanged(path, embeddedClient, 0o755); err != nil {
+		return "", fmt.Errorf("resolveClientBin: %w", err)
+	}
+	return path, nil
 }
 
-// resolveXrayBin locates the `xray` binary the same way as
-// resolveClientBin. This repo never publishes xray itself (the manual
-// onboarding kits ship it by hand from upstream Xray-core), so in practice
-// candidate 1 below rarely exists for xray — candidates 2 and 3 are the
-// realistic paths, kept here for symmetry with resolveClientBin.
-func resolveXrayBin(dir string) (string, error) {
-	return resolveBin(dir, "xray")
-}
-
-// resolveBin finds a binary named base, trying in order:
-//  1. base-<GOOS>-<GOARCH>[.exe] next to the running executable — the
-//     name .goreleaser.yaml's `raw` archive actually publishes for
-//     client/server/desktop (name_template: "{{.Binary}}-{{.Os}}-{{.Arch}}").
-//     This is the primary/expected case for a release download.
-//  2. bare base[.exe] next to the running executable, in case a user
-//     renamed it for convenience.
-//  3. exec.LookPath(base) — an already-installed kit binary on PATH.
-//
-// Returns a clear error naming all three attempted locations if none exist,
-// so callers can print something actionable instead of a bare
-// "fork/exec: no such file or directory".
-func resolveBin(dir, base string) (string, error) {
-	exeSuffix := ""
+// resolveXrayBin extracts the embedded xray binary (and, on Windows, the
+// wintun.dll it needs at runtime next to it — xray-core's tun inbound
+// requires this, see proxy/tun's README) to binDir() and returns xray's
+// path for RunXray to exec.
+func resolveXrayBin() (string, error) {
+	dir, err := binDir()
+	if err != nil {
+		return "", fmt.Errorf("resolveXrayBin: %w", err)
+	}
+	path := filepath.Join(dir, "xray"+exeSuffix())
+	if err := extractIfChanged(path, embeddedXray, 0o755); err != nil {
+		return "", fmt.Errorf("resolveXrayBin: %w", err)
+	}
 	if runtime.GOOS == "windows" {
-		exeSuffix = ".exe"
+		wintunPath := filepath.Join(dir, "wintun.dll")
+		if err := extractIfChanged(wintunPath, embeddedWintun, 0o644); err != nil {
+			return "", fmt.Errorf("resolveXrayBin: extract wintun.dll: %w", err)
+		}
 	}
-	versioned := filepath.Join(dir, fmt.Sprintf("%s-%s-%s%s", base, runtime.GOOS, runtime.GOARCH, exeSuffix))
-	if _, err := os.Stat(versioned); err == nil {
-		return versioned, nil
-	}
-	bare := filepath.Join(dir, base+exeSuffix)
-	if _, err := os.Stat(bare); err == nil {
-		return bare, nil
-	}
-	if p, err := exec.LookPath(base); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("%s не найден: искал %s, %s и %s в PATH", base, versioned, bare, base)
+	return path, nil
 }
