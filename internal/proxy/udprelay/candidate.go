@@ -25,3 +25,39 @@ func groupPrefix24(hostport string) string {
 	}
 	return fmt.Sprintf("%d.%d.%d", ip[0], ip[1], ip[2])
 }
+
+// pickReplacementCandidate chooses which non-active hot-set member to
+// retire at the next refresh tick: the member whose relay's /24 group has
+// the most OTHER representatives currently in the hot-set (over-represented
+// groups first), so refresh churn actively pushes toward group diversity
+// instead of picking at random. groups maps streamID -> its relay's /24 key;
+// a streamID missing from groups (still connecting, or connection failed
+// before Params.OnAllocated fired) is never picked - retiring a slot we
+// know nothing about yet would be guessing, not measuring. Returns -1 if no
+// eligible member exists (empty hot-set, every known group has exactly one
+// representative, or no group memberships are known yet).
+func pickReplacementCandidate(streamIDs []int, activeStreamID int, groups map[int]string) int {
+	counts := make(map[string]int, len(streamIDs))
+	for _, id := range streamIDs {
+		if g, ok := groups[id]; ok {
+			counts[g]++
+		}
+	}
+
+	best := -1
+	bestCount := 1 // только группы с >=2 представителями считаются избыточными
+	for _, id := range streamIDs {
+		if id == activeStreamID {
+			continue
+		}
+		g, ok := groups[id]
+		if !ok {
+			continue
+		}
+		if counts[g] > bestCount {
+			bestCount = counts[g]
+			best = id
+		}
+	}
+	return best
+}
