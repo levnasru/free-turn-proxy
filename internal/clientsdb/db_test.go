@@ -16,7 +16,7 @@ func TestClientsDB(t *testing.T) {
 		t.Fatalf("Failed to create db: %v", err)
 	}
 
-	if err = db.Add("client-123", "Test 1"); err != nil {
+	if err = db.Add("client-123", "Test 1", 0); err != nil {
 		t.Fatalf("Failed to add client: %v", err)
 	}
 
@@ -37,7 +37,7 @@ func TestClientsDB(t *testing.T) {
 	}
 
 	// Test persistence
-	_ = db.Add("client-789", "Test Persistence")
+	_ = db.Add("client-789", "Test Persistence", 0)
 
 	db2, err := New(dbPath)
 	if err != nil {
@@ -53,11 +53,59 @@ func TestClientsDB(t *testing.T) {
 	db2.lastModified = db2.lastModified.Add(-1 * time.Second)
 	db2.mu.Unlock()
 
-	_ = db.Add("client-999", "Hot reload test")
+	_ = db.Add("client-999", "Hot reload test", 0)
 	db2.loadIfModified()
 
 	if !db2.IsAuthorized("client-999") {
 		t.Errorf("Expected client-999 to be loaded via hot reload")
+	}
+}
+
+func TestClientsDBMaxStreams(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "clients.json")
+
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create db: %v", err)
+	}
+
+	if err = db.Add("capped", "N=2", 2); err != nil {
+		t.Fatalf("Failed to add client: %v", err)
+	}
+	if err = db.Add("unlimited", "N=0", 0); err != nil {
+		t.Fatalf("Failed to add client: %v", err)
+	}
+
+	// A client outside the db can never acquire, no matter what it asks for.
+	if db.TryAcquireStream("ghost") {
+		t.Errorf("Unauthorized client acquired a stream slot")
+	}
+
+	// capped=2 grants exactly two concurrent slots, then refuses further
+	// connections regardless of how many the client itself tries to open -
+	// this is the server-side enforcement, independent of the client's -n.
+	if !db.TryAcquireStream("capped") {
+		t.Fatalf("Expected first acquire to succeed")
+	}
+	if !db.TryAcquireStream("capped") {
+		t.Fatalf("Expected second acquire to succeed")
+	}
+	if db.TryAcquireStream("capped") {
+		t.Errorf("Expected third acquire to be refused (max_streams=2)")
+	}
+
+	// Releasing frees a slot back up.
+	db.ReleaseStream("capped")
+	if !db.TryAcquireStream("capped") {
+		t.Errorf("Expected acquire to succeed after release")
+	}
+
+	// max_streams=0 means unlimited.
+	for i := 0; i < 50; i++ {
+		if !db.TryAcquireStream("unlimited") {
+			t.Fatalf("Expected unlimited client to always acquire (i=%d)", i)
+		}
 	}
 }
 

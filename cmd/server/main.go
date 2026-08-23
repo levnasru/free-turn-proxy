@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -192,6 +193,11 @@ func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserve
 			logger.Warnf("Unauthorized Client ID: %s. Dropping connection.", clientID)
 			return
 		}
+		if !db.TryAcquireStream(clientID) {
+			logger.Warnf("Client %s exceeded max-streams limit. Dropping connection.", clientID)
+			return
+		}
+		defer db.ReleaseStream(clientID)
 		logger.Debugf("Client %s authorized", clientID)
 	} else {
 		logger.Debugf("Client ID received (no allowlist): %s", clientID)
@@ -228,7 +234,7 @@ func handleClientsCommand(args []string) {
 	switch cmd {
 	case "add":
 		if len(args) < 2 {
-			fmt.Println("Usage: server clients add <client_id> [comment]")
+			fmt.Println("Usage: server clients add <client_id> [comment] [max_streams]")
 			os.Exit(1)
 		}
 		clientID := args[1]
@@ -236,7 +242,16 @@ func handleClientsCommand(args []string) {
 		if len(args) > 2 {
 			comment = args[2]
 		}
-		if err := db.Add(clientID, comment); err != nil {
+		maxStreams := 0
+		if len(args) > 3 {
+			n, perr := strconv.Atoi(args[3])
+			if perr != nil || n < 0 {
+				fmt.Printf("Invalid max_streams %q: must be a non-negative integer\n", args[3])
+				os.Exit(1)
+			}
+			maxStreams = n
+		}
+		if err := db.Add(clientID, comment, maxStreams); err != nil {
 			fmt.Printf("Failed to add client: %v\n", err)
 			os.Exit(1)
 		}
@@ -256,7 +271,11 @@ func handleClientsCommand(args []string) {
 		clients := db.List()
 		fmt.Printf("Found %d clients in %s:\n", len(clients), dbPath)
 		for id, info := range clients {
-			fmt.Printf(" - %s (Comment: %s)\n", id, info.Comment)
+			limit := "unlimited"
+			if info.MaxStreams > 0 {
+				limit = strconv.Itoa(info.MaxStreams)
+			}
+			fmt.Printf(" - %s (Comment: %s, max-streams: %s)\n", id, info.Comment, limit)
 		}
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)

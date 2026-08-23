@@ -13,6 +13,10 @@ import (
 // ClientInfo содержит метаданные о клиенте
 type ClientInfo struct {
 	Comment string `json:"comment,omitempty"`
+	// MaxStreams - жёсткий потолок одновременных соединений с сервером для
+	// этого клиента, независимо от того, что клиент запросит флагом -n.
+	// 0 = без ограничения.
+	MaxStreams int `json:"max_streams,omitempty"`
 }
 
 // Data структура JSON-файла
@@ -26,13 +30,15 @@ type DB struct {
 	path         string
 	data         Data
 	lastModified time.Time
+	active       map[string]int // текущее число открытых соединений на clientID
 }
 
 // New создает новую базу данных и загружает ее из файла
 func New(path string) (*DB, error) {
 	db := &DB{
-		path: path,
-		data: Data{Clients: make(map[string]ClientInfo)},
+		path:   path,
+		data:   Data{Clients: make(map[string]ClientInfo)},
+		active: make(map[string]int),
 	}
 
 	if err := db.load(); err != nil {
@@ -65,12 +71,40 @@ func (db *DB) IsAuthorized(clientID string) bool {
 }
 
 // Add добавляет или обновляет клиента (и сразу сохраняет на диск)
-func (db *DB) Add(clientID, comment string) error {
+func (db *DB) Add(clientID, comment string, maxStreams int) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	db.data.Clients[clientID] = ClientInfo{Comment: comment}
+	db.data.Clients[clientID] = ClientInfo{Comment: comment, MaxStreams: maxStreams}
 	return db.save()
+}
+
+// TryAcquireStream резервирует один слот соединения для clientID, если не
+// превышен его MaxStreams. Каждый успешный вызов должен быть парным с
+// ReleaseStream. clientID должен быть уже авторизован вызывающим.
+func (db *DB) TryAcquireStream(clientID string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	info, ok := db.data.Clients[clientID]
+	if !ok {
+		return false
+	}
+	if info.MaxStreams > 0 && db.active[clientID] >= info.MaxStreams {
+		return false
+	}
+	db.active[clientID]++
+	return true
+}
+
+// ReleaseStream освобождает слот, занятый TryAcquireStream.
+func (db *DB) ReleaseStream(clientID string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.active[clientID] > 0 {
+		db.active[clientID]--
+	}
 }
 
 // Remove удаляет клиента
