@@ -44,6 +44,21 @@ type Params struct {
 	GetCreds     GetCredsFunc
 	ClientID     string
 	TrafficStats *stats.Stats
+
+	// OnAllocated, если задан, вызывается один раз сразу после успешного
+	// TURN-allocate для потока streamID с адресом реального relay-сервера,
+	// на который он сел. sessionManager использует это для /24-группировки
+	// при обновлении состава hot-set'а (см. pickReplacementCandidate и
+	// docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md).
+	// nil - no-op, как и TrafficStats.
+	OnAllocated func(streamID int, relayAddr *net.UDPAddr)
+
+	// RotateCh, если задан, немедленно переключает активный слот hot-set'а
+	// на следующего кандидата при получении сигнала - ручной триггер для
+	// пользователя, когда деградация видна, но не ловится liveness-проверкой
+	// (см. ту же спеку, "Failover"). nil - ручного переключения нет
+	// (TCP+bond режим его не использует).
+	RotateCh <-chan struct{}
 }
 
 // streamStartBarrier - максимум, который стримы 2..N ждут прогрева кэша
