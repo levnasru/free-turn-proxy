@@ -3,6 +3,7 @@ package udprelay
 import (
 	"fmt"
 	"net"
+	"time"
 )
 
 // groupPrefix24 returns the /24 group key for a "host:port" relay address:
@@ -60,4 +61,11 @@ func pickReplacementCandidate(streamIDs []int, activeStreamID int, groups map[in
 		}
 	}
 	return best
+}
+
+// shouldRefresh reports whether interval has elapsed since lastRefresh, as
+// of now. A plain function of three values, not a stateful ticker wrapper -
+// keeps the refresh decision itself testable without a real clock or sleep.
+func shouldRefresh(lastRefresh, now time.Time, interval time.Duration) bool {
+	return !now.Before(lastRefresh.Add(interval))
 }

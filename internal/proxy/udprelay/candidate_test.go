@@ -1,6 +1,9 @@
 package udprelay
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestGroupPrefix24(t *testing.T) {
 	t.Parallel()
@@ -72,4 +75,29 @@ func TestPickReplacementCandidate(t *testing.T) {
 			t.Errorf("got %d, want one of the non-active members of the 3-strong group a (2 or 3)", got)
 		}
 	})
+}
+
+func TestShouldRefresh(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	interval := 5 * time.Minute
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"before interval elapsed", base.Add(4 * time.Minute), false},
+		{"exactly at interval", base.Add(5 * time.Minute), true},
+		{"past interval", base.Add(10 * time.Minute), true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldRefresh(base, c.now, interval); got != c.want {
+				t.Errorf("shouldRefresh(%v, %v, %v) = %v, want %v", base, c.now, interval, got, c.want)
+			}
+		})
+	}
 }
