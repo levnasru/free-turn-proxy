@@ -445,7 +445,11 @@ git commit -m "feat(udprelay): additive OnAllocated/RotateCh hooks in Params"
 ```go
 package udprelay
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 func newTestSlot(streamID int) *slotHandle {
 	return &slotHandle{
