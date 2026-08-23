@@ -29,6 +29,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/bondclient"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/tcpfwd"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/udprelay"
+	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/sub"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
@@ -164,6 +165,11 @@ func main() {
 	}
 	totalStreams := cfg.TURN.N * max(providerCount, 1)
 
+	// Логи иначе не говорят о трафике ничего, кроме факта установки стрима -
+	// диагностировать "все стримы up, а данных нет" по ним было нельзя.
+	trafficStats := stats.New(true)
+	go logTrafficStats(ctx, logger, trafficStats)
+
 	if cfg.Proxy.Mode != config.ProxyModeUDP {
 		tcpDtlsDialer := &dtlsdial.Dialer{
 			HandshakeTimeout: 30 * time.Second,
@@ -186,6 +192,7 @@ func main() {
 			KCPProfile:   cfg.KCP.Profile,
 			KCPFEC:       cfg.KCP.FEC,
 			ClientID:     cfg.ClientID,
+			TrafficStats: trafficStats,
 		}
 		if err := tcpfwd.Run(ctx, tcpDeps, tcpParams, peer, cfg.Proxy.Listen, totalStreams, cfg.Proxy.Mode == config.ProxyModeTCPFwdBond); err != nil {
 			logger.Errorf("tcpfwd: %v", err)
@@ -207,6 +214,7 @@ func main() {
 		ObfTiming:    cfg.Obf.Timing,
 		GetCreds:     udprelay.GetCredsFunc(getCreds),
 		ClientID:     cfg.ClientID,
+		TrafficStats: trafficStats,
 	}
 	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, totalStreams); err != nil {
 		if errors.Is(err, udprelay.ErrFatal) {
@@ -366,4 +374,31 @@ func clientConfigPaths() []string {
 		paths = append(paths, filepath.Join(d, name))
 	}
 	return paths
+}
+
+// statsLogInterval - как часто логировать агрегированную скорость по всем
+// стримам. Не привязан к какому-то одному стриму - CountingConn считает
+// байты на wire-уровне (после DTLS/обфускации) суммарно по туннелю.
+const statsLogInterval = 10 * time.Second
+
+// logTrafficStats периодически пишет в лог агрегированную скорость и общий
+// объём трафика - до этого лог сообщал только об установке стримов и не
+// показывал, идут ли через них реальные данные.
+func logTrafficStats(ctx context.Context, logger logx.Logger, s *stats.Stats) {
+	t := time.NewTicker(statsLogInterval)
+	defer t.Stop()
+	var prevTx, prevRx uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tx, rx := s.Counters()
+			logger.Infof("[STATS] down=%s up=%s (total down=%s up=%s)",
+				stats.FormatBitsPerSecond(rx-prevRx, statsLogInterval),
+				stats.FormatBitsPerSecond(tx-prevTx, statsLogInterval),
+				stats.FormatByteCount(rx), stats.FormatByteCount(tx))
+			prevTx, prevRx = tx, rx
+		}
+	}
 }
