@@ -32,3 +32,13 @@ dist
 /.codegraph/
 /.agent/
 /.worktrees/
+
+# инструментальные конфиги/артефакты, не часть проекта
+.agents/
+.cursor/
+.gemini/
+GEMINI.md
+/graphify-out/
+
+# секреты харвестера (VK session state, TURN-креды) — никогда не коммитить
+/vps_via_key_test/
