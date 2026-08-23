@@ -96,6 +96,10 @@ func main() {
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 		dtls.WithConnectionIDGenerator(dtls.RandomCIDGenerator(8)),
+		// см. dtlsdial.DefaultReplayProtectionWindow - дефолт pion/dtls (64)
+		// меньше KCP-окна, легитимные задержавшиеся сегменты тихо дропались
+		// бы как replay.
+		dtls.WithReplayProtectionWindow(dtlsdial.DefaultReplayProtectionWindow),
 	}
 	var listener net.Listener
 	if cfg.Obf.Enabled() {

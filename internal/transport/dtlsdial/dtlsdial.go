@@ -17,6 +17,15 @@ func GenerateSelfSignedCert() (tls.Certificate, error) {
 	return selfsign.GenerateSelfSigned()
 }
 
+// DefaultReplayProtectionWindow - размер окна анти-replay DTLS. Дефолт
+// pion/dtls (64) меньше KCP-окна (SndWnd/RcvWnd=512, internal/transport/kcptun) -
+// под нагрузкой и любым реордерингом на relay-пути легитимные, просто
+// задержавшиеся сегменты попадают за окно и тихо дропаются как replay, KCP
+// видит это как потерю и ретрансмитит. Общая константа для клиента и сервера -
+// значение не измерено живым прогоном, подобрано по арифметике (запас над
+// окном KCP), только чтобы обе стороны совпадали.
+const DefaultReplayProtectionWindow = 1024
+
 // Dialer конфигурирует DTLS-handshake клиента.
 type Dialer struct {
 	// HandshakeTimeout ограничивает контекст handshake. Ноль - без таймаута.
@@ -61,6 +70,7 @@ func (d *Dialer) Dial(ctx context.Context, pc net.PacketConn, peer *net.UDPAddr)
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 		dtls.WithConnectionIDGenerator(dtls.OnlySendCIDGenerator()),
+		dtls.WithReplayProtectionWindow(DefaultReplayProtectionWindow),
 	)
 	if err != nil {
 		return nil, err

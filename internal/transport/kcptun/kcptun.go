@@ -117,6 +117,11 @@ func NewKCPOverDTLS(dtlsConn net.Conn, isServer bool, profile Profile, fec FEC) 
 	sess.SetWindowSize(profile.SndWnd, profile.RcvWnd)
 	sess.SetMtu(profile.MTU)
 	sess.SetACKNoDelay(profile.ACKNoDelay)
+	// Без этого каждый Write() форсирует немедленный kcp.flush() вместо
+	// накопления до следующего Interval - для объёмной передачи (это и есть
+	// наш случай, не интерактивный трафик) сам kcp-go рекомендует true в
+	// доке SetWriteDelay.
+	sess.SetWriteDelay(true)
 
 	return sess, nil
 }
