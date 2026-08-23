@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -201,6 +203,9 @@ func main() {
 		return
 	}
 
+	rotateCh := make(chan struct{}, 1)
+	go readRotateCommands(ctx, logger, rotateCh)
+
 	udpDtlsDialer := &dtlsdial.Dialer{
 		HandshakeTimeout: 20 * time.Second,
 		HandshakeSem:     make(chan struct{}, dtlsHandshakeConcurrency),
@@ -215,8 +220,9 @@ func main() {
 		GetCreds:     udprelay.GetCredsFunc(getCreds),
 		ClientID:     cfg.ClientID,
 		TrafficStats: trafficStats,
+		RotateCh:     rotateCh,
 	}
-	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, totalStreams); err != nil {
+	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, cfg.TURN.N); err != nil {
 		if errors.Is(err, udprelay.ErrFatal) {
 			logger.Errorf("udprelay: fatal: %v", err)
 		} else {
@@ -400,5 +406,29 @@ func logTrafficStats(ctx context.Context, logger logx.Logger, s *stats.Stats) {
 				stats.FormatByteCount(rx), stats.FormatByteCount(tx))
 			prevTx, prevRx = tx, rx
 		}
+	}
+}
+
+// readRotateCommands читает построчные команды из stdin запущенного
+// процесса - Android (CoreProcessController) и cmd/desktop уже держат
+// клиент как подпроцесс с открытым stdin/stdout, симметрично добавляем
+// чтение команд туда же, без нового порта/listener'а (см.
+// docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
+// "Failover"). Сейчас поддерживает только "rotate" - ручное переключение
+// активного слота hot-set'а в -transport udp.
+func readRotateCommands(ctx context.Context, logger logx.Logger, rotateCh chan<- struct{}) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
+		if strings.TrimSpace(scanner.Text()) != "rotate" {
+			continue
+		}
+		select {
+		case rotateCh <- struct{}{}:
+		default:
+		}
+		logger.Infof("[rotate] manual hot-set rotation requested")
 	}
 }
