@@ -121,6 +121,96 @@ func TestDispatcherFailoverPicksMostRecentlyUpSlot(t *testing.T) {
 	}
 }
 
+func TestDispatcherReplaceSlot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("retiring the active slot is a no-op", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		fresh := newTestSlot(3)
+		if ok := d.replaceSlot(1, fresh); ok {
+			t.Fatal("expected replaceSlot to refuse retiring the active slot")
+		}
+		if got := d.activeStreamID(); got != 1 {
+			t.Fatalf("active slot must be unchanged, got %d", got)
+		}
+		got := d.currentSlots()
+		if len(got) != 2 || got[0].streamID != 1 || got[1].streamID != 2 {
+			t.Fatalf("hot-set must be unchanged, got %+v", got)
+		}
+	})
+
+	t.Run("retiring an unknown streamID is a no-op", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		fresh := newTestSlot(3)
+		if ok := d.replaceSlot(99, fresh); ok {
+			t.Fatal("expected replaceSlot to refuse retiring an unknown streamID")
+		}
+		got := d.currentSlots()
+		if len(got) != 2 || got[0].streamID != 1 || got[1].streamID != 2 {
+			t.Fatalf("hot-set must be unchanged, got %+v", got)
+		}
+	})
+
+	t.Run("retiring a real non-active slot swaps it in", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		fresh := newTestSlot(3)
+		if ok := d.replaceSlot(2, fresh); !ok {
+			t.Fatal("expected replaceSlot to succeed retiring the non-active slot")
+		}
+		if got := d.activeStreamID(); got != 1 {
+			t.Fatalf("active slot must be unchanged, got %d", got)
+		}
+		got := d.currentSlots()
+		if len(got) != 2 || got[0].streamID != 1 || got[1].streamID != 3 {
+			t.Fatalf("expected slot 2 swapped for slot 3 in place, got %+v", got)
+		}
+
+		// Routing still works after the swap: active slot untouched, new
+		// member reachable once made active.
+		d.route(&Packet{Data: []byte("x"), N: 1})
+		select {
+		case <-s1.inbound:
+		default:
+			t.Fatal("expected packet still routed to unchanged active slot s1")
+		}
+	})
+
+	t.Run("simulated TOCTOU: dispatcher rotates onto the retire candidate first", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		// sessionManager.refreshOne would have read active=1 here and decided
+		// to retire streamID 2 - then the dispatcher rotates onto 2 before
+		// the swap actually happens.
+		d.rotateManual()
+		if got := d.activeStreamID(); got != 2 {
+			t.Fatalf("setup: expected active streamID 2 after manual rotate, got %d", got)
+		}
+
+		fresh := newTestSlot(3)
+		if ok := d.replaceSlot(2, fresh); ok {
+			t.Fatal("expected replaceSlot to refuse retiring the now-active slot 2")
+		}
+		if got := d.activeStreamID(); got != 2 {
+			t.Fatalf("active slot must still be 2 (live traffic preserved), got %d", got)
+		}
+	})
+}
+
 func TestDispatcherFailoverFallsBackToNextWhenNoUpSignalKnown(t *testing.T) {
 	t.Parallel()
 	d := newDispatcher()

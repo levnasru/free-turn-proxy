@@ -78,6 +78,34 @@ func (d *dispatcher) setSlots(slots []*slotHandle, keepActiveStreamID int) {
 	d.consecutiveDrops = 0
 }
 
+// replaceSlot atomically retires oldStreamID and installs newSlot in its
+// place, IF oldStreamID is not the currently active slot at the moment the
+// swap actually happens (not at some earlier snapshot) - closes a TOCTOU
+// window where sessionManager.refreshOne's separate read-decide-write calls
+// could otherwise retire a slot the dispatcher had already rotated onto
+// between the read and the write, silently reverting a legitimate rotation
+// and tearing down live traffic. Returns false (no-op) if oldStreamID is
+// currently active or not found in the hot-set - caller should treat that
+// as "nothing to do this tick", not an error.
+func (d *dispatcher) replaceSlot(oldStreamID int, newSlot *slotHandle) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if len(d.slots) == 0 || d.slots[d.active].streamID == oldStreamID {
+		return false
+	}
+	for i, s := range d.slots {
+		if s.streamID == oldStreamID {
+			newSlots := make([]*slotHandle, len(d.slots))
+			copy(newSlots, d.slots)
+			newSlots[i] = newSlot
+			d.slots = newSlots
+			return true
+		}
+	}
+	return false
+}
+
 // currentSlots возвращает копию текущего состава hot-set'а - для
 // sessionManager.refreshOne, чтобы решать, кого заменить, не держа мьютекс
 // диспетчера дольше одного вызова.

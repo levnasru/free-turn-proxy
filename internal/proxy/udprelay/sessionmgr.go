@@ -183,9 +183,10 @@ func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup) {
 // refreshOne retires one non-active, group-over-represented hot-set member
 // (see pickReplacementCandidate) and launches a fresh candidate (next
 // sequential streamID) in its place. A no-op if nothing is clearly
-// over-represented right now (including while some members' groups are
-// still unknown - see Params.OnAllocated) - degrades to no churn, never to
-// an error.
+// over-represented right now, or if the dispatcher's active slot changed
+// between the read and the retire decision (see dispatcher.replaceSlot -
+// closes a TOCTOU window that could otherwise tear down a slot the
+// dispatcher had just rotated onto).
 func (sm *sessionManager) refreshOne(ctx context.Context, wg *sync.WaitGroup) {
 	slots := sm.disp.currentSlots()
 	if len(slots) == 0 {
@@ -212,15 +213,17 @@ func (sm *sessionManager) refreshOne(ctx context.Context, wg *sync.WaitGroup) {
 	sm.nextID++
 	fresh := sm.launchSlot(ctx, wg, sm.nextID, nil)
 
-	newSlots := make([]*slotHandle, 0, len(slots))
-	for _, s := range slots {
-		if s.streamID == retireID {
-			continue
+	if !sm.disp.replaceSlot(retireID, fresh) {
+		// Диспетчер уже сам сменил активный слот на retireID (или тот
+		// вообще исчез из hot-set'а) между чтением active выше и этим
+		// моментом - отменяем свежий кандидат, чтобы не оставить висящую
+		// TURN-аллокацию, и просто пропускаем этот тик обновления.
+		if cancel, ok := sm.cancels[fresh.streamID]; ok {
+			cancel()
+			delete(sm.cancels, fresh.streamID)
 		}
-		newSlots = append(newSlots, s)
+		return
 	}
-	newSlots = append(newSlots, fresh)
-	sm.disp.setSlots(newSlots, active)
 
 	if cancel, ok := sm.cancels[retireID]; ok {
 		cancel()
