@@ -8,9 +8,9 @@ import (
 func TestGroupPrefix24(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name    string
+		name     string
 		hostport string
-		want    string
+		want     string
 	}{
 		{"ipv4 with port", "203.0.113.42:3478", "203.0.113"},
 		{"ipv4 different last octet still same group", "203.0.113.7:443", "203.0.113"},
