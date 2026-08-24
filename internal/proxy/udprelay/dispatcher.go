@@ -27,12 +27,19 @@ type slotHandle struct {
 // дешёвым сигналом "слот сейчас не читает", см. maxConsecutiveDropsBeforeFailover.
 const slotInboundBufferSize = 4
 
-// rotateThresholdBytes - сколько байт пропустить через активный слот до
-// плановой ротации на следующего кандидата hot-set'а. НЕ откалибровано
-// живым замером - стартовая точка по спеке (см. "Открытые вопросы" в
-// docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md),
-// требует эмпирической калибровки отдельным прогоном.
-const rotateThresholdBytes = 2 * 1024 * 1024
+// rotateInterval - как долго активный слот остаётся активным до плановой
+// ротации на следующего кандидата hot-set'а. Триггер по ВРЕМЕНИ, не по
+// объёму байт: байтовый порог структурно смещён против цели "усреднение по
+// пулу" из спеки (docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
+// раздел "Интерпретация") - медленному пути дольше набрать тот же объём,
+// значит он и получает БОЛЬШЕ эфирного времени, а не меньше. Живой замер
+// throughput 2026-08-24 подтвердил эффект (0.3 МБ/с при 2МиБ-пороге, как
+// будто выдан один пир). Время даёт каждому кандидату РАВНОЕ эфирное время
+// вне зависимости от его скорости - корректная "усреднение по пулу".
+// НЕ окончательно откалибровано - стартовая точка. var (не const) только
+// затем, чтобы dispatcher_test.go мог временно подставить короткий интервал
+// вместо ожидания секунд в юнит-тесте - в бою значение не меняется.
+var rotateInterval = 1500 * time.Millisecond
 
 // maxConsecutiveDropsBeforeFailover - сколько подряд неудачных попыток
 // отдать пакет активному слоту считать его мёртвым и переключаться
@@ -41,7 +48,7 @@ const maxConsecutiveDropsBeforeFailover = 5
 
 // dispatcher - единственный читатель общего inboundChan (см. run.go).
 // Владеет индексом активного слота hot-set'а, переключает его по
-// накопленному объёму, по ручному триггеру и по liveness-отказу активного
+// истечении времени, по ручному триггеру и по liveness-отказу активного
 // слота. Не открывает и не закрывает сами TURN/DTLS-сессии - этим
 // занимается sessionManager; dispatcher только маршрутизирует пакеты уже
 // поднятых слотов.
@@ -50,13 +57,13 @@ type dispatcher struct {
 	slots  []*slotHandle
 	active int
 
-	bytesSinceRotate uint64
+	lastRotate       time.Time
 	consecutiveDrops int
 	lastUp           map[int]time.Time // streamID -> время последнего up-сигнала
 }
 
 func newDispatcher() *dispatcher {
-	return &dispatcher{lastUp: make(map[int]time.Time)}
+	return &dispatcher{lastUp: make(map[int]time.Time), lastRotate: time.Now()}
 }
 
 // setSlots (пере)задаёт состав hot-set'а. keepActiveStreamID - какой слот
@@ -74,7 +81,7 @@ func (d *dispatcher) setSlots(slots []*slotHandle, keepActiveStreamID int) {
 			break
 		}
 	}
-	d.bytesSinceRotate = 0
+	d.lastRotate = time.Now()
 	d.consecutiveDrops = 0
 }
 
@@ -140,8 +147,8 @@ func (d *dispatcher) markUp(streamID int, at time.Time) {
 	d.lastUp[streamID] = at
 }
 
-// rotateManual переключает активный слот немедленно, в обход порога по
-// объёму - вызывается из run() при получении сигнала на rotateCh.
+// rotateManual переключает активный слот немедленно, в обход таймера -
+// вызывается из run() при получении сигнала на rotateCh.
 func (d *dispatcher) rotateManual() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -155,12 +162,12 @@ func (d *dispatcher) rotateLocked() {
 		return
 	}
 	d.active = (d.active + 1) % len(d.slots)
-	d.bytesSinceRotate = 0
+	d.lastRotate = time.Now()
 	d.consecutiveDrops = 0
 }
 
-// route отдаёт один пакет активному слоту, считает байты для плановой
-// ротации и отслеживает подряд идущие отказы для liveness-failover.
+// route отдаёт один пакет активному слоту, проверяет, не истёк ли таймер
+// плановой ротации, и отслеживает подряд идущие отказы для liveness-failover.
 func (d *dispatcher) route(pkt *Packet) {
 	d.mu.Lock()
 	if len(d.slots) == 0 {
@@ -175,8 +182,7 @@ func (d *dispatcher) route(pkt *Packet) {
 	case active.inbound <- pkt:
 		d.mu.Lock()
 		d.consecutiveDrops = 0
-		d.bytesSinceRotate += uint64(pkt.N)
-		if d.bytesSinceRotate >= rotateThresholdBytes {
+		if time.Since(d.lastRotate) >= rotateInterval {
 			d.rotateLocked()
 		}
 		d.mu.Unlock()
@@ -217,7 +223,7 @@ func (d *dispatcher) run(ctx context.Context, inboundChan <-chan *Packet, rotate
 // round-robin if no other slot has ever signaled up yet. Caller must hold d.mu.
 func (d *dispatcher) failoverLocked() {
 	if len(d.slots) <= 1 {
-		d.bytesSinceRotate = 0
+		d.lastRotate = time.Now()
 		d.consecutiveDrops = 0
 		return
 	}
@@ -238,6 +244,6 @@ func (d *dispatcher) failoverLocked() {
 	} else {
 		d.active = (d.active + 1) % len(d.slots)
 	}
-	d.bytesSinceRotate = 0
+	d.lastRotate = time.Now()
 	d.consecutiveDrops = 0
 }

@@ -57,17 +57,28 @@ func TestDispatcherManualRotate(t *testing.T) {
 	}
 }
 
-func TestDispatcherRotatesByVolume(t *testing.T) {
-	t.Parallel()
+func TestDispatcherRotatesByTime(t *testing.T) {
+	// Не t.Parallel(): подменяет пакетную переменную rotateInterval.
+	orig := rotateInterval
+	rotateInterval = time.Millisecond
+	defer func() { rotateInterval = orig }()
+
 	d := newDispatcher()
 	s1, s2 := newTestSlot(1), newTestSlot(2)
 	d.setSlots([]*slotHandle{s1, s2}, 1)
 
-	// Один пакет с N=rotateThresholdBytes уже должен вызвать ротацию.
-	d.route(&Packet{Data: make([]byte, 1), N: rotateThresholdBytes})
+	// Первый пакет сразу после setSlots не должен ротировать - таймер только
+	// что сброшен.
+	d.route(&Packet{Data: []byte("x"), N: 1})
+	if got := d.activeStreamID(); got != 1 {
+		t.Fatalf("expected no rotation immediately after setSlots, got streamID %d", got)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	d.route(&Packet{Data: []byte("x"), N: 1})
 
 	if got := d.activeStreamID(); got != 2 {
-		t.Fatalf("expected rotation to streamID 2 after crossing volume threshold, got %d", got)
+		t.Fatalf("expected rotation to streamID 2 after rotateInterval elapsed, got %d", got)
 	}
 }
 
