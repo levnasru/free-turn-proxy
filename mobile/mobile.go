@@ -84,7 +84,27 @@ var (
 	sessionGen atomic.Int64 // номер текущей сессии; растёт на каждый Start/Stop
 	trafficVal atomic.Pointer[sessionTraffic]
 	runWG      sync.WaitGroup // сигналит, когда udprelay/tcpfwd.Run реально вернулся (TURN-аллокации освобождены)
+
+	activeRotateCh atomic.Pointer[chan struct{}]
 )
+
+// TriggerRotate запрашивает немедленное переключение активного слота
+// hot-set'а в текущей UDP-сессии (см.
+// docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
+// "Failover"). Ручной триггер для iOS: там нет отдельного
+// stdin-подпроцесса как у Android/desktop (см. cmd/client/main.go's
+// readRotateCommands), gomobile зовёт эту функцию in-process напрямую.
+// No-op, если сессия не запущена либо запущена не в UDP-режиме.
+func TriggerRotate() {
+	p := activeRotateCh.Load()
+	if p == nil {
+		return
+	}
+	select {
+	case *p <- struct{}{}:
+	default:
+	}
+}
 
 func setStatus(s *statusInfo) { statusVal.Store(s) }
 
@@ -325,9 +345,18 @@ func startWithArgs(args []string, clientType string) error {
 						everConnected = true
 					}
 
+					// UDP hot-set: один dispatcher на cfg.TURN.N слотов вне
+					// зависимости от числа забондленных провайдеров - totalStreams
+					// (умножение на providerCount) тут не подходит, это TCP-семантика
+					// "N стримов на каждый аккаунт".
+					statusTotal := cfg.TURN.N
+					if cfg.Proxy.Mode != config.ProxyModeUDP {
+						statusTotal = totalStreams
+					}
+
 					if captchaActive.Load() {
 						deadline = time.Now().Add(connectTimeout)
-						setStatus(&statusInfo{state: StateCaptcha, streams: int(n), total: totalStreams})
+						setStatus(&statusInfo{state: StateCaptcha, streams: int(n), total: statusTotal})
 						continue
 					}
 
@@ -335,7 +364,7 @@ func startWithArgs(args []string, clientType string) error {
 					if n > 0 {
 						state = StateConnected
 					}
-					setStatus(&statusInfo{state: state, streams: int(n), total: totalStreams})
+					setStatus(&statusInfo{state: state, streams: int(n), total: statusTotal})
 
 					if !everConnected && time.Now().After(deadline) {
 						watchdogErr = fmt.Errorf("не удалось подключиться: ни один поток не поднялся за %s - проверьте ссылку на звонок и адрес сервера (подробности в логах)", connectTimeout)
@@ -378,6 +407,10 @@ func startWithArgs(args []string, clientType string) error {
 			return
 		}
 
+		rotateCh := make(chan struct{}, 1)
+		activeRotateCh.Store(&rotateCh)
+		defer activeRotateCh.CompareAndSwap(&rotateCh, nil)
+
 		udpDtlsDialer := &dtlsdial.Dialer{
 			HandshakeTimeout: 20 * time.Second,
 			HandshakeSem:     make(chan struct{}, 3),
@@ -392,9 +425,10 @@ func startWithArgs(args []string, clientType string) error {
 			GetCreds:     udprelay.GetCredsFunc(getCreds),
 			ClientID:     cfg.ClientID,
 			TrafficStats: traffic.stats,
+			RotateCh:     rotateCh,
 		}
 
-		if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peerAddr, cfg.Proxy.Listen, totalStreams); err != nil {
+		if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peerAddr, cfg.Proxy.Listen, cfg.TURN.N); err != nil {
 			if !errors.Is(ctx.Err(), context.Canceled) {
 				finalErr = err
 			}

@@ -44,6 +44,21 @@ type Params struct {
 	GetCreds     GetCredsFunc
 	ClientID     string
 	TrafficStats *stats.Stats
+
+	// OnAllocated, если задан, вызывается один раз сразу после успешного
+	// TURN-allocate для потока streamID с адресом реального relay-сервера,
+	// на который он сел. sessionManager использует это для /24-группировки
+	// при обновлении состава hot-set'а (см. pickReplacementCandidate и
+	// docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md).
+	// nil - no-op, как и TrafficStats.
+	OnAllocated func(streamID int, relayAddr *net.UDPAddr)
+
+	// RotateCh, если задан, немедленно переключает активный слот hot-set'а
+	// на следующего кандидата при получении сигнала - ручной триггер для
+	// пользователя, когда деградация видна, но не ловится liveness-проверкой
+	// (см. ту же спеку, "Failover"). nil - ручного переключения нет
+	// (TCP+bond режим его не использует).
+	RotateCh <-chan struct{}
 }
 
 // streamStartBarrier - максимум, который стримы 2..N ждут прогрева кэша
@@ -78,14 +93,15 @@ func (d *Deps) log() logx.Logger {
 	return d.Log
 }
 
-// Run - точка входа UDP-режима. Биндит listenAddr, распределяет входящие пакеты
-// в общую очередь и запускает numStreams пар (DTLSLoop, TURNLoop).
-// connectedStreams принадлежит вызывающему (provider может читать через свой
-// StreamsAlive-аналог) и инкрементируется/декрементируется в oneTURN.
-// Возвращается после выхода всех потоков (т.е. при отмене ctx).
-// При фатальной provider-ошибке возвращает ErrFatal - вызывающий делает
-// os.Exit без вмешательства udprelay в хост-процесс.
-func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, logger logx.Logger, connectedStreams *atomic.Int32, params *Params, peer *net.UDPAddr, listenAddr string, numStreams int) error {
+// Run - точка входа UDP-режима. Биндит listenAddr, распределяет входящие
+// пакеты через dispatcher в hot-set из hotSetK живых DTLS+TURN сессий
+// (вместо прежних N независимых, см. docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md).
+// connectedStreams принадлежит вызывающему (provider может читать через
+// свой StreamsAlive-аналог) и инкрементируется/декрементируется в oneTURN,
+// как и раньше. Возвращается после выхода всех потоков (т.е. при отмене
+// ctx). При фатальной provider-ошибке возвращает ErrFatal - вызывающий
+// делает os.Exit без вмешательства udprelay в хост-процесс.
+func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, logger logx.Logger, connectedStreams *atomic.Int32, params *Params, peer *net.UDPAddr, listenAddr string, hotSetK int) error {
 	listenConn, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("udprelay listen %s: %w", listenAddr, err)
@@ -96,8 +112,8 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 		}
 	})
 
-	if numStreams <= 0 {
-		numStreams = 1
+	if hotSetK <= 0 {
+		hotSetK = 1
 	}
 
 	fatalCh := make(chan error, 1)
@@ -111,9 +127,6 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 		fatalCh:          fatalCh,
 	}
 
-	// runCtx отменяется при обнаружении фатальной ошибки (через fatalCh),
-	// распространяя отмену во все потоковые циклы без необходимости хранить
-	// ссылку на cancel-функцию хост-процесса.
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
@@ -124,41 +137,11 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 	})
 	t := time.Tick(200 * time.Millisecond)
 
-	// Стрим 1 стартует первым и сигналит okchan при первом успешном handshake.
-	// Остальные стримы ждут этот сигнал (или ctx/safety-timeout), чтобы не бить
-	// по VK API одновременно: стрим 1 прогревает кэш credentials
-	// (streams-per-cred), после чего 2..N переиспользуют тёплый кэш вместо N
-	// параллельных запросов к VK - это снимает thundering herd на старте
-	// (частая причина rate-limit/captcha при одновременном подъёме всех стримов).
-	okchan := make(chan struct{}, 1)
-	{
-		cchan := make(chan net.PacketConn)
-		wg.Go(func() {
-			DTLSLoop(runCtx, deps, params, peer, listenConn, inboundChan, cchan, okchan, 1)
-		})
-		wg.Go(func() {
-			TURNLoop(runCtx, deps, params, peer, cchan, t, 1)
-		})
-	}
-
-	// Барьер: ждём первый успешный стрим, отмену ctx, либо safety-timeout -
-	// если стрим 1 не поднимается, не стопорим остальные навсегда (liveness).
-	select {
-	case <-okchan:
-	case <-runCtx.Done():
-	case <-time.After(streamStartBarrier):
-	}
-
-	for i := 1; i < numStreams; i++ {
-		cchan := make(chan net.PacketConn)
-		streamID := i + 1
-		wg.Go(func() {
-			DTLSLoop(runCtx, deps, params, peer, listenConn, inboundChan, cchan, nil, streamID)
-		})
-		wg.Go(func() {
-			TURNLoop(runCtx, deps, params, peer, cchan, t, streamID)
-		})
-	}
+	sm := newSessionManager(deps, params, peer, listenConn, hotSetK, t)
+	params.OnAllocated = sm.onAllocated
+	wg.Go(func() {
+		sm.run(runCtx, inboundChan, params.RotateCh)
+	})
 
 	// При фатальной ошибке отменяем остальные горутины и пробрасываем наверх.
 	// watcherDone синхронизирует watcher-горутину с возвратом Run, обеспечивая
