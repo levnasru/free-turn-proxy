@@ -100,6 +100,7 @@ func (d *dispatcher) replaceSlot(oldStreamID int, newSlot *slotHandle) bool {
 			copy(newSlots, d.slots)
 			newSlots[i] = newSlot
 			d.slots = newSlots
+			delete(d.lastUp, oldStreamID)
 			return true
 		}
 	}
