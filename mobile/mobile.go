@@ -345,9 +345,18 @@ func startWithArgs(args []string, clientType string) error {
 						everConnected = true
 					}
 
+					// UDP hot-set: один dispatcher на cfg.TURN.N слотов вне
+					// зависимости от числа забондленных провайдеров - totalStreams
+					// (умножение на providerCount) тут не подходит, это TCP-семантика
+					// "N стримов на каждый аккаунт".
+					statusTotal := cfg.TURN.N
+					if cfg.Proxy.Mode != config.ProxyModeUDP {
+						statusTotal = totalStreams
+					}
+
 					if captchaActive.Load() {
 						deadline = time.Now().Add(connectTimeout)
-						setStatus(&statusInfo{state: StateCaptcha, streams: int(n), total: totalStreams})
+						setStatus(&statusInfo{state: StateCaptcha, streams: int(n), total: statusTotal})
 						continue
 					}
 
@@ -355,7 +364,7 @@ func startWithArgs(args []string, clientType string) error {
 					if n > 0 {
 						state = StateConnected
 					}
-					setStatus(&statusInfo{state: state, streams: int(n), total: totalStreams})
+					setStatus(&statusInfo{state: state, streams: int(n), total: statusTotal})
 
 					if !everConnected && time.Now().After(deadline) {
 						watchdogErr = fmt.Errorf("не удалось подключиться: ни один поток не поднялся за %s - проверьте ссылку на звонок и адрес сервера (подробности в логах)", connectTimeout)
