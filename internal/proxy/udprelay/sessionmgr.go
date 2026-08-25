@@ -27,6 +27,7 @@ type sessionManager struct {
 	t          <-chan time.Time // общий тик TURNLoop, один на процесс, как и раньше
 
 	disp *dispatcher
+	grad *gradientTracker // Шаг 2: скользящий RTT-baseline для gradientLoop
 
 	nextID int // следующий свободный streamID; трогает только run()'s горутина
 
@@ -47,6 +48,7 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 		k:          k,
 		t:          t,
 		disp:       newDispatcher(),
+		grad:       newGradientTracker(),
 		groups:     make(map[int]string),
 		cancels:    make(map[int]context.CancelFunc),
 	}
@@ -147,6 +149,7 @@ func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, r
 	}()
 
 	go sm.logHealthLoop(ctx)
+	go sm.gradientLoop(ctx)
 
 	sm.refreshLoop(ctx, &wg)
 
@@ -183,6 +186,51 @@ func (sm *sessionManager) logHealthLoop(ctx context.Context) {
 				sm.deps.log().Debugf("[STREAM %d] health: rtt=%s tx=%s rx=%s",
 					s.streamID, s.health.rtt(), stats.FormatByteCount(tx), stats.FormatByteCount(rx))
 			}
+		}
+	}
+}
+
+// gradientLogInterval - как часто gradientLoop печатает предложение по
+// размеру hot-set'а. Реже, чем slotHealthLogInterval - это агрегат по всему
+// hot-set'у, не per-slot событие, и решение о ресайзе не должно дёргаться
+// каждые 5с. НЕ откалибровано живым замером.
+const gradientLogInterval = 30 * time.Second
+
+// gradientLoop - Шаг 2: раз в gradientLogInterval считает средний RTT по
+// текущему hot-set'у, кормит им скользящий baseline (sm.grad) и логирует,
+// каким K предложил бы себя видеть gradient-контроллер - НЕ применяет
+// предложение, sm.k и реальный размер hot-set'а этим циклом не трогаются.
+// См. gradient.go про формулу и её ограничение (RTT неотличим от честной
+// загруженности канала).
+func (sm *sessionManager) gradientLoop(ctx context.Context) {
+	ticker := time.NewTicker(gradientLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			slots := sm.disp.currentSlots()
+			var sum time.Duration
+			var n int
+			for _, s := range slots {
+				if rtt := s.health.rtt(); rtt > 0 {
+					sum += rtt
+					n++
+				}
+			}
+			if n == 0 {
+				continue
+			}
+			avgRTT := sum / time.Duration(n)
+			sm.grad.observe(avgRTT)
+			minRTT := sm.grad.baseline()
+
+			gradient, suggested := suggestedHotSetSize(sm.k, avgRTT, minRTT)
+			sm.deps.log().Debugf(
+				"[GRADIENT] K=%d avgRTT=%s minRTT=%s gradient=%.3f suggestedK=%d (dry-run, не применяется)",
+				sm.k, avgRTT, minRTT, gradient, suggested,
+			)
 		}
 	}
 }

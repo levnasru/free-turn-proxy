@@ -1,0 +1,90 @@
+package udprelay
+
+import (
+	"math"
+	"sync"
+	"time"
+)
+
+// Шаг 2: считаем, что hot-set'у стоило бы быть размером K, но НЕ применяем -
+// только логируем предложение (см. gradientLoop в sessionmgr.go). Адаптация
+// gradient-контроллера (Envoy adaptive concurrency / Netflix concurrency-limits,
+// оба - вариации TCP Vegas) под наш случай: вместо одного соединения и лимита
+// concurrency у нас K параллельных путей и решение "сколько путей держать
+// живыми". Сигнал - средний RTT по hot-set'у против скользящего baseline
+// (минимум за последние minRTTResetInterval), а не RTT одного запроса.
+//
+// ⚠️ Известная слабина, ровно поэтому Шаг 2 - только лог, не применение:
+// RTT растёт и под реальной деградацией пути, и просто когда канал честно
+// забит (bufferbloat при максимальной отдаче/скачивании) - отличить одно от
+// другого по одному только RTT нельзя (та же причина, по которой появился
+// BBR - Vegas/Reno этого не различают). Прежде чем это управляло реальным K,
+// нужно насмотреться на dry-run логи из живых сессий и сверить с тем, была
+// ли скорость реально плохой в момент просадки RTT, а не просто канал занят
+// своим делом.
+
+// minRTTResetInterval - как часто baseline (минимум) сбрасывается и меряется
+// заново, чтобы устойчивая деградация не осела навсегда как "норма" (тот же
+// приём, что в Envoy - без джиттера, он там против синхронного ресета по
+// всему флоту хостов, у нас один процесс). НЕ откалибровано живым замером.
+const minRTTResetInterval = 2 * time.Minute
+
+// gradientBufferFraction - допуск поверх baseline до того, как численно
+// считать деградацией (терпимость к обычному джиттеру). НЕ откалибровано.
+const gradientBufferFraction = 0.2
+
+// gradientTracker хранит скользящий baseline (минимум среднего RTT hot-set'а)
+// с периодическим сбросом окна.
+type gradientTracker struct {
+	mu          sync.Mutex
+	minRTT      time.Duration
+	windowStart time.Time
+}
+
+func newGradientTracker() *gradientTracker {
+	return &gradientTracker{windowStart: time.Now()}
+}
+
+// observe обновляет baseline очередным средним RTT hot-set'а за тик.
+func (g *gradientTracker) observe(avgRTT time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if time.Since(g.windowStart) >= minRTTResetInterval {
+		g.minRTT = 0
+		g.windowStart = time.Now()
+	}
+	if g.minRTT == 0 || avgRTT < g.minRTT {
+		g.minRTT = avgRTT
+	}
+}
+
+func (g *gradientTracker) baseline() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.minRTT
+}
+
+// suggestedHotSetSize - чистая часть формулы, без сайд-эффектов, чтобы
+// проверяться таблицей без таймеров/горутин. avgRTT<=0 или minRTT<=0
+// (данных ещё нет) - предложение равно текущему K, без деления на ноль.
+// Предложение зажато в [1, currentK*3] - Шаг 2 не решает, какие границы
+// разумны в бою, это вопрос Шага 3; тут только чтобы одиночный кривой сэмпл
+// не напечатал в лог отрицательное или заоблачное число.
+func suggestedHotSetSize(currentK int, avgRTT, minRTT time.Duration) (gradient float64, suggested int) {
+	if avgRTT <= 0 || minRTT <= 0 || currentK <= 0 {
+		return 0, currentK
+	}
+	buffer := time.Duration(float64(minRTT) * gradientBufferFraction)
+	gradient = float64(minRTT+buffer) / float64(avgRTT)
+	headroom := math.Sqrt(float64(currentK))
+	raw := gradient*float64(currentK) + headroom
+
+	suggested = int(math.Round(raw))
+	if suggested < 1 {
+		suggested = 1
+	}
+	if max := currentK * 3; suggested > max {
+		suggested = max
+	}
+	return gradient, suggested
+}
