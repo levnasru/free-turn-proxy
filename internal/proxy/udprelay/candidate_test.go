@@ -101,3 +101,49 @@ func TestShouldRefresh(t *testing.T) {
 		})
 	}
 }
+
+func TestPickSlotToRetireForShrink(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no RTT data yet - falls back to first non-active", func(t *testing.T) {
+		t.Parallel()
+		got := pickSlotToRetireForShrink([]int{1, 2, 3}, 1, map[int]time.Duration{})
+		if got != 2 {
+			t.Errorf("got %d, want 2 (first non-active)", got)
+		}
+	})
+
+	t.Run("picks the worst measured RTT among non-active members", func(t *testing.T) {
+		t.Parallel()
+		rtts := map[int]time.Duration{
+			1: 10 * time.Millisecond,
+			2: 50 * time.Millisecond,
+			3: 20 * time.Millisecond,
+		}
+		got := pickSlotToRetireForShrink([]int{1, 2, 3}, 1, rtts)
+		if got != 2 {
+			t.Errorf("got %d, want 2 (worst RTT among non-active members)", got)
+		}
+	})
+
+	t.Run("never picks the active slot even if it has the worst RTT", func(t *testing.T) {
+		t.Parallel()
+		rtts := map[int]time.Duration{
+			1: 90 * time.Millisecond,
+			2: 10 * time.Millisecond,
+			3: 20 * time.Millisecond,
+		}
+		got := pickSlotToRetireForShrink([]int{1, 2, 3}, 1, rtts)
+		if got != 3 {
+			t.Errorf("got %d, want 3 (worst RTT among non-active members, ignoring active streamID 1)", got)
+		}
+	})
+
+	t.Run("only the active slot exists - nothing to retire", func(t *testing.T) {
+		t.Parallel()
+		got := pickSlotToRetireForShrink([]int{1}, 1, map[int]time.Duration{1: 10 * time.Millisecond})
+		if got != -1 {
+			t.Errorf("got %d, want -1", got)
+		}
+	})
+}

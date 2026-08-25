@@ -59,6 +59,13 @@ type Params struct {
 	// (см. ту же спеку, "Failover"). nil - ручного переключения нет
 	// (TCP+bond режим его не использует).
 	RotateCh <-chan struct{}
+
+	// GrowCh/ShrinkCh, если заданы, - ручной триггер живого ресайза
+	// hot-set'а на ±1 (Шаг 3, см. sessionManager.growHotSet/shrinkHotSet).
+	// Пока не подключены к gradientLoop's предложению - только ручной ввод.
+	// nil - ресайза нет (как и у RotateCh).
+	GrowCh   <-chan struct{}
+	ShrinkCh <-chan struct{}
 }
 
 // streamStartBarrier - максимум, который стримы 2..N ждут прогрева кэша
@@ -140,7 +147,7 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 	sm := newSessionManager(deps, params, peer, listenConn, hotSetK, t)
 	params.OnAllocated = sm.onAllocated
 	wg.Go(func() {
-		sm.run(runCtx, inboundChan, params.RotateCh)
+		sm.run(runCtx, inboundChan, params.RotateCh, params.GrowCh, params.ShrinkCh)
 	})
 
 	// При фатальной ошибке отменяем остальные горутины и пробрасываем наверх.

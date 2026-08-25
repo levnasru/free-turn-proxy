@@ -93,7 +93,7 @@ var (
 // docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
 // "Failover"). Ручной триггер для iOS: там нет отдельного
 // stdin-подпроцесса как у Android/desktop (см. cmd/client/main.go's
-// readRotateCommands), gomobile зовёт эту функцию in-process напрямую.
+// readManualCommands), gomobile зовёт эту функцию in-process напрямую.
 // No-op, если сессия не запущена либо запущена не в UDP-режиме.
 func TriggerRotate() {
 	p := activeRotateCh.Load()

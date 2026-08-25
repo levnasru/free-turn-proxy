@@ -166,3 +166,92 @@ func TestDispatcherReplaceSlot(t *testing.T) {
 		}
 	})
 }
+
+func TestDispatcherAddSlot(t *testing.T) {
+	t.Parallel()
+	d := newDispatcher()
+	s1, s2 := newTestSlot(1), newTestSlot(2)
+	d.setSlots([]*slotHandle{s1, s2}, 1)
+
+	s3 := newTestSlot(3)
+	d.addSlot(s3)
+
+	got := d.currentSlots()
+	if len(got) != 3 || got[2].streamID != 3 {
+		t.Fatalf("expected slot 3 appended, got %+v", got)
+	}
+	if got := d.activeStreamID(); got != 1 {
+		t.Fatalf("addSlot must not disturb the active slot, got %d", got)
+	}
+
+	// New member actually receives traffic once round-robin reaches it.
+	for i := 0; i < 3; i++ {
+		d.route(&Packet{Data: []byte("x"), N: 1})
+	}
+	select {
+	case <-s3.inbound:
+	default:
+		t.Fatal("expected the newly added slot to receive a packet within one full round-robin cycle")
+	}
+}
+
+func TestDispatcherRemoveSlot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removing the active slot is a no-op", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		if ok := d.removeSlot(1); ok {
+			t.Fatal("expected removeSlot to refuse removing the active slot")
+		}
+		if got := d.currentSlots(); len(got) != 2 {
+			t.Fatalf("hot-set must be unchanged, got %+v", got)
+		}
+	})
+
+	t.Run("removing an unknown streamID is a no-op", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2 := newTestSlot(1), newTestSlot(2)
+		d.setSlots([]*slotHandle{s1, s2}, 1)
+
+		if ok := d.removeSlot(99); ok {
+			t.Fatal("expected removeSlot to refuse an unknown streamID")
+		}
+	})
+
+	t.Run("removing a real non-active slot shrinks the hot-set", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2, s3 := newTestSlot(1), newTestSlot(2), newTestSlot(3)
+		d.setSlots([]*slotHandle{s1, s2, s3}, 1)
+
+		if ok := d.removeSlot(2); !ok {
+			t.Fatal("expected removeSlot to succeed removing the non-active slot")
+		}
+		got := d.currentSlots()
+		if len(got) != 2 || got[0].streamID != 1 || got[1].streamID != 3 {
+			t.Fatalf("expected slot 2 gone, 1 and 3 remaining in place, got %+v", got)
+		}
+		if got := d.activeStreamID(); got != 1 {
+			t.Fatalf("active slot must still be 1, got %d", got)
+		}
+	})
+
+	t.Run("removing a slot before the active index keeps active pointed at the same streamID", func(t *testing.T) {
+		t.Parallel()
+		d := newDispatcher()
+		s1, s2, s3 := newTestSlot(1), newTestSlot(2), newTestSlot(3)
+		d.setSlots([]*slotHandle{s1, s2, s3}, 3) // active = index 2 (streamID 3)
+
+		if ok := d.removeSlot(1); !ok { // removes index 0, before active
+			t.Fatal("expected removeSlot to succeed")
+		}
+		if got := d.activeStreamID(); got != 3 {
+			t.Fatalf("active must still resolve to streamID 3 after the index shift, got %d", got)
+		}
+	})
+}

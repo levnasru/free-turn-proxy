@@ -204,7 +204,9 @@ func main() {
 	}
 
 	rotateCh := make(chan struct{}, 1)
-	go readRotateCommands(ctx, logger, rotateCh)
+	growCh := make(chan struct{}, 1)
+	shrinkCh := make(chan struct{}, 1)
+	go readManualCommands(ctx, logger, rotateCh, growCh, shrinkCh)
 
 	udpDtlsDialer := &dtlsdial.Dialer{
 		HandshakeTimeout: 20 * time.Second,
@@ -221,6 +223,8 @@ func main() {
 		ClientID:     cfg.ClientID,
 		TrafficStats: trafficStats,
 		RotateCh:     rotateCh,
+		GrowCh:       growCh,
+		ShrinkCh:     shrinkCh,
 	}
 	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, cfg.TURN.N); err != nil {
 		if errors.Is(err, udprelay.ErrFatal) {
@@ -409,26 +413,41 @@ func logTrafficStats(ctx context.Context, logger logx.Logger, s *stats.Stats) {
 	}
 }
 
-// readRotateCommands читает построчные команды из stdin запущенного
+// readManualCommands читает построчные команды из stdin запущенного
 // процесса - Android (CoreProcessController) и cmd/desktop уже держат
 // клиент как подпроцесс с открытым stdin/stdout, симметрично добавляем
 // чтение команд туда же, без нового порта/listener'а (см.
 // docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
-// "Failover"). Сейчас поддерживает только "rotate" - ручное переключение
-// активного слота hot-set'а в -transport udp.
-func readRotateCommands(ctx context.Context, logger logx.Logger, rotateCh chan<- struct{}) {
+// "Failover"). "rotate" - ручное переключение активного слота hot-set'а;
+// "grow"/"shrink" - ручной ±1 к размеру hot-set'а (Шаг 3, живой ресайз -
+// см. sessionManager.growHotSet/shrinkHotSet). Всё это в -transport udp,
+// пока только для ручного теста - gradientLoop's предложение сюда ещё не
+// подключено.
+func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growCh, shrinkCh chan<- struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return
 		}
-		if strings.TrimSpace(scanner.Text()) != "rotate" {
-			continue
+		switch strings.TrimSpace(scanner.Text()) {
+		case "rotate":
+			select {
+			case rotateCh <- struct{}{}:
+			default:
+			}
+			logger.Infof("[rotate] manual hot-set rotation requested")
+		case "grow":
+			select {
+			case growCh <- struct{}{}:
+			default:
+			}
+			logger.Infof("[grow] manual hot-set growth requested")
+		case "shrink":
+			select {
+			case shrinkCh <- struct{}{}:
+			default:
+			}
+			logger.Infof("[shrink] manual hot-set shrink requested")
 		}
-		select {
-		case rotateCh <- struct{}{}:
-		default:
-		}
-		logger.Infof("[rotate] manual hot-set rotation requested")
 	}
 }

@@ -121,8 +121,11 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 // run запускает начальный hot-set: первый слот один, с барьером прогрева
 // кэша credentials (идентично тому, как раньше Run() ждал стрим 1 перед
 // запуском 2..N), затем оставшиеся K-1 сразу следом. После этого ведёт
-// dispatcher и refresh-цикл (см. Task 8's refreshOne) до отмены ctx.
-func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, rotateCh <-chan struct{}) {
+// dispatcher и refresh-цикл (см. Task 8's refreshOne) до отмены ctx. growCh/
+// shrinkCh - ручной триггер живого ресайза hot-set'а (Шаг 3, см.
+// growHotSet/shrinkHotSet); nil-канал блокируется в select навсегда -
+// безопасно, TCP+bond ими не пользуется, как и rotateCh.
+func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, rotateCh, growCh, shrinkCh <-chan struct{}) {
 	wg := sync.WaitGroup{}
 	sm.nextID = 1
 
@@ -151,10 +154,58 @@ func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, r
 	go sm.logHealthLoop(ctx)
 	go sm.gradientLoop(ctx)
 
-	sm.refreshLoop(ctx, &wg)
+	sm.refreshLoop(ctx, &wg, growCh, shrinkCh)
 
 	wg.Wait()
 	<-dispDone
+}
+
+// growHotSet launches one more slot and appends it to the dispatcher's live
+// hot-set - K goes up by one (Шаг 3, живой ресайз). Mirrors launchSlot's use
+// in refreshOne, but appends instead of swapping - dispatcher.addSlot never
+// touches existing members, so unlike replaceSlot there's no TOCTOU window
+// to guard here.
+func (sm *sessionManager) growHotSet(ctx context.Context, wg *sync.WaitGroup) {
+	sm.nextID++
+	fresh := sm.launchSlot(ctx, wg, sm.nextID, nil)
+	sm.disp.addSlot(fresh)
+	sm.k++
+	sm.deps.log().Infof("[HOTSET] выросли до K=%d (добавлен поток %d)", sm.k, fresh.streamID)
+}
+
+// shrinkHotSet retires one slot (worst measured RTT - see
+// pickSlotToRetireForShrink) and shrinks K by one (Шаг 3, живой ресайз).
+// No-op if only one slot remains (never shrink to zero) or the dispatcher
+// refuses the removal (target became active between the read and the
+// removal - same TOCTOU class replaceSlot guards against).
+func (sm *sessionManager) shrinkHotSet() {
+	slots := sm.disp.currentSlots()
+	if len(slots) <= 1 {
+		return
+	}
+	active := sm.disp.activeStreamID()
+
+	ids := make([]int, len(slots))
+	rtts := make(map[int]time.Duration, len(slots))
+	for i, s := range slots {
+		ids[i] = s.streamID
+		rtts[s.streamID] = s.health.rtt()
+	}
+
+	retireID := pickSlotToRetireForShrink(ids, active, rtts)
+	if retireID < 0 || !sm.disp.removeSlot(retireID) {
+		return
+	}
+
+	if cancel, ok := sm.cancels[retireID]; ok {
+		cancel()
+		delete(sm.cancels, retireID)
+	}
+	sm.mu.Lock()
+	delete(sm.groups, retireID)
+	sm.mu.Unlock()
+	sm.k--
+	sm.deps.log().Infof("[HOTSET] сжались до K=%d (убран поток %d)", sm.k, retireID)
 }
 
 // hotSetRefreshInterval - как часто sessionManager рассматривает замену
@@ -240,7 +291,7 @@ func (sm *sessionManager) gradientLoop(ctx context.Context) {
 // its own - nextID and cancels are only ever touched from here or from
 // launchSlot, which this goroutine also calls, so neither field needs its
 // own lock (see the sessionManager doc comment).
-func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup) {
+func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, growCh, shrinkCh <-chan struct{}) {
 	ticker := time.NewTicker(hotSetRefreshInterval)
 	defer ticker.Stop()
 	lastRefresh := time.Now()
@@ -254,6 +305,10 @@ func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup) {
 				sm.refreshOne(ctx, wg)
 				lastRefresh = now
 			}
+		case <-growCh:
+			sm.growHotSet(ctx, wg)
+		case <-shrinkCh:
+			sm.shrinkHotSet()
 		}
 	}
 }

@@ -63,6 +63,38 @@ func pickReplacementCandidate(streamIDs []int, activeStreamID int, groups map[in
 	return best
 }
 
+// pickSlotToRetireForShrink chooses which hot-set member to drop when
+// shrinking K by one (Шаг 3, живой ресайз): the one with the worst measured
+// RTT (see slotHealth) - the whole point of shrinking is to walk away from
+// paths dragging avgRTT down, and that's the signal we already have from
+// Шаг 1/2. Falls back to the first non-active member if nobody has an RTT
+// sample yet (rtts all zero - fresh hot-set, no measurements landed) -
+// retiring at random beats not shrinking at all when asked to. Never picks
+// activeStreamID, same reasoning as pickReplacementCandidate. Returns -1 if
+// nothing is eligible (empty, or the only member is active).
+func pickSlotToRetireForShrink(streamIDs []int, activeStreamID int, rtts map[int]time.Duration) int {
+	worst := -1
+	var worstRTT time.Duration
+	for _, id := range streamIDs {
+		if id == activeStreamID {
+			continue
+		}
+		if rtt := rtts[id]; rtt > worstRTT {
+			worstRTT = rtt
+			worst = id
+		}
+	}
+	if worst >= 0 {
+		return worst
+	}
+	for _, id := range streamIDs {
+		if id != activeStreamID {
+			return id
+		}
+	}
+	return -1
+}
+
 // shouldRefresh reports whether interval has elapsed since lastRefresh, as
 // of now. A plain function of three values, not a stateful ticker wrapper -
 // keeps the refresh decision itself testable without a real clock or sleep.

@@ -96,6 +96,44 @@ func (d *dispatcher) replaceSlot(oldStreamID int, newSlot *slotHandle) bool {
 	return false
 }
 
+// addSlot добавляет новый слот в конец hot-set'а - живой рост K (Шаг 3).
+// Не трогает d.active - индексы существующих членов не меняются, значит и
+// защита replaceSlot/removeSlot от TOCTOU не ломается.
+func (d *dispatcher) addSlot(slot *slotHandle) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	newSlots := make([]*slotHandle, len(d.slots)+1)
+	copy(newSlots, d.slots)
+	newSlots[len(d.slots)] = slot
+	d.slots = newSlots
+}
+
+// removeSlot убирает streamID из hot-set'а - живое уменьшение K (Шаг 3).
+// Тот же TOCTOU-guard, что и в replaceSlot: отказывает, если streamID -
+// текущий активный (диспетчер мог переключиться на него между чтением
+// состава вызывающим и этим вызовом) или не найден. Возвращает true, если
+// реально убрали.
+func (d *dispatcher) removeSlot(streamID int) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.slots) == 0 || d.slots[d.active].streamID == streamID {
+		return false
+	}
+	for i, s := range d.slots {
+		if s.streamID == streamID {
+			newSlots := make([]*slotHandle, 0, len(d.slots)-1)
+			newSlots = append(newSlots, d.slots[:i]...)
+			newSlots = append(newSlots, d.slots[i+1:]...)
+			d.slots = newSlots
+			if d.active > i {
+				d.active--
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // currentSlots возвращает копию текущего состава hot-set'а - для
 // sessionManager.refreshOne, чтобы решать, кого заменить, не держа мьютекс
 // диспетчера дольше одного вызова.
