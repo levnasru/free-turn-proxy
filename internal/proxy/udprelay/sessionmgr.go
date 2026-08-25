@@ -2,7 +2,9 @@ package udprelay
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -282,8 +284,38 @@ func (sm *sessionManager) gradientLoop(ctx context.Context) {
 				"[GRADIENT] K=%d avgRTT=%s minRTT=%s gradient=%.3f suggestedK=%d (dry-run, не применяется)",
 				sm.k, avgRTT, minRTT, gradient, suggested,
 			)
+			if sm.deps.log().DebugEnabled() {
+				appendGradientLog(time.Now(), sm.k, avgRTT, minRTT, gradient, suggested)
+			}
 		}
 	}
+}
+
+// gradientLogFile - относительный путь (CWD ядра - на Android это
+// context.filesDir, на desktop - рабочая директория запуска, тот же
+// принцип, что у -hub-cache) для построчного CSV-хвоста [GRADIENT]-тиков.
+// Причина отдельного файла: Android-приложение держит только 200 последних
+// строк в своём буфере логов (ProxyServiceState) - при 30 строках/тик от
+// per-slot health-лога это ~30с истории, а с одним лишь GRADIENT+STATS -
+// всё равно только ~25 минут. Для накопления сигнала за дни обычного
+// использования (нужно для Шага 4) кольцевой буфер не годится ни в каком
+// виде - файл переживает и это, и рестарты процесса.
+const gradientLogFile = "gradient-log.csv"
+
+// appendGradientLog дописывает один [GRADIENT]-тик в gradientLogFile.
+// Ошибка открытия/записи проглатывается - это диагностика, не должна ронять
+// сессию. Пишет заголовок CSV один раз, если файл пуст/только что создан.
+func appendGradientLog(ts time.Time, k int, avgRTT, minRTT time.Duration, gradient float64, suggested int) {
+	f, err := os.OpenFile(gradientLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if info, statErr := f.Stat(); statErr == nil && info.Size() == 0 {
+		fmt.Fprintln(f, "timestamp,k,avg_rtt_ms,min_rtt_ms,gradient,suggested_k")
+	}
+	fmt.Fprintf(f, "%s,%d,%.3f,%.3f,%.3f,%d\n",
+		ts.Format(time.RFC3339), k, avgRTT.Seconds()*1000, minRTT.Seconds()*1000, gradient, suggested)
 }
 
 // refreshLoop periodically calls refreshOne while ctx is alive. Runs on the
