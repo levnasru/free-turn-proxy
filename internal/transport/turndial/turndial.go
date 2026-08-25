@@ -43,6 +43,23 @@ type Stream struct {
 	// блэкхолит data-path) - вызывающий рециклит allocation. См. permwatch.go.
 	PermDead <-chan struct{}
 	close    func() error
+
+	client *turn.Client // для Ping() - тот же клиент, что делал Allocate
+}
+
+// Ping шлёт лёгкий STUN Binding-запрос через уже открытый TURN-клиент
+// (turn.Client.SendBindingRequest - штатный публичный метод pion/turn, не
+// новое соединение и не новый протокол) и возвращает его RTT - реальный
+// network-сигнал до этого конкретного relay-пути, независимый от
+// непрозрачного data-plane (WG-байты через него не читаются). Ошибка
+// (таймаут, исчерпание ретрансмитов) - сигнал пропустить этот замер, а не
+// рвать поток.
+func (s *Stream) Ping() (time.Duration, error) {
+	start := time.Now()
+	if _, err := s.client.SendBindingRequest(); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
 }
 
 // Close освобождает аллокацию, TURN-клиент и транспорт.
@@ -170,6 +187,7 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 		Relay:         relay,
 		ServerUDPAddr: turnServerUDPAddr,
 		PermDead:      permDead,
+		client:        client,
 		close: func() error {
 			var firstErr error
 			if cerr := relay.Close(); cerr != nil {

@@ -14,31 +14,24 @@ func newTestSlot(streamID int) *slotHandle {
 	}
 }
 
-func TestDispatcherRoutesToActiveSlot(t *testing.T) {
+func TestDispatcherRoutesRoundRobin(t *testing.T) {
 	t.Parallel()
 	d := newDispatcher()
-	s1, s2 := newTestSlot(1), newTestSlot(2)
-	d.setSlots([]*slotHandle{s1, s2}, 1)
+	s1, s2, s3 := newTestSlot(1), newTestSlot(2), newTestSlot(3)
+	d.setSlots([]*slotHandle{s1, s2, s3}, 1)
 
-	pkt := &Packet{Data: []byte("x"), N: 1}
-	d.route(pkt)
-
-	select {
-	case got := <-s1.inbound:
-		if got != pkt {
-			t.Fatal("wrong packet delivered to active slot")
-		}
-	default:
-		t.Fatal("expected packet on active slot s1")
+	for i := 0; i < 6; i++ {
+		d.route(&Packet{Data: []byte("x"), N: 1})
 	}
-	select {
-	case <-s2.inbound:
-		t.Fatal("inactive slot s2 must not receive packets")
-	default:
+
+	for _, s := range []*slotHandle{s1, s2, s3} {
+		if got := len(s.inbound); got != 2 {
+			t.Fatalf("expected 2 packets on slot %d after 6 round-robin routes, got %d", s.streamID, got)
+		}
 	}
 }
 
-func TestDispatcherManualRotate(t *testing.T) {
+func TestDispatcherManualRotateChangesActiveStreamID(t *testing.T) {
 	t.Parallel()
 	d := newDispatcher()
 	s1, s2 := newTestSlot(1), newTestSlot(2)
@@ -48,38 +41,8 @@ func TestDispatcherManualRotate(t *testing.T) {
 	if got := d.activeStreamID(); got != 2 {
 		t.Fatalf("expected active streamID 2 after manual rotate, got %d", got)
 	}
-
-	d.route(&Packet{Data: []byte("x"), N: 1})
-	select {
-	case <-s2.inbound:
-	default:
-		t.Fatal("expected packet on newly active slot s2")
-	}
-}
-
-func TestDispatcherRotatesByTime(t *testing.T) {
-	// Не t.Parallel(): подменяет пакетную переменную rotateInterval.
-	orig := rotateInterval
-	rotateInterval = time.Millisecond
-	defer func() { rotateInterval = orig }()
-
-	d := newDispatcher()
-	s1, s2 := newTestSlot(1), newTestSlot(2)
-	d.setSlots([]*slotHandle{s1, s2}, 1)
-
-	// Первый пакет сразу после setSlots не должен ротировать - таймер только
-	// что сброшен.
-	d.route(&Packet{Data: []byte("x"), N: 1})
-	if got := d.activeStreamID(); got != 1 {
-		t.Fatalf("expected no rotation immediately after setSlots, got streamID %d", got)
-	}
-
-	time.Sleep(5 * time.Millisecond)
-	d.route(&Packet{Data: []byte("x"), N: 1})
-
-	if got := d.activeStreamID(); got != 2 {
-		t.Fatalf("expected rotation to streamID 2 after rotateInterval elapsed, got %d", got)
-	}
+	// rotateManual no longer affects routing (see route()'s doc comment) -
+	// only replaceSlot's retire-guard cares about d.active now.
 }
 
 func TestDispatcherRunReadsInboundAndRotate(t *testing.T) {
@@ -110,26 +73,6 @@ func TestDispatcherRunReadsInboundAndRotate(t *testing.T) {
 
 	cancel()
 	<-done
-}
-
-func TestDispatcherFailoverPicksMostRecentlyUpSlot(t *testing.T) {
-	t.Parallel()
-	d := newDispatcher()
-	dead := &slotHandle{streamID: 1, inbound: make(chan *Packet)} // unbuffered: route() always hits default, nobody reads
-	stale := newTestSlot(2)
-	fresh := newTestSlot(3)
-	d.setSlots([]*slotHandle{dead, stale, fresh}, 1)
-
-	d.markUp(2, time.Now().Add(-time.Minute))
-	d.markUp(3, time.Now())
-
-	for i := 0; i < maxConsecutiveDropsBeforeFailover; i++ {
-		d.route(&Packet{Data: []byte("x"), N: 1})
-	}
-
-	if got := d.activeStreamID(); got != 3 {
-		t.Fatalf("expected failover to most recently up slot (3), got %d", got)
-	}
 }
 
 func TestDispatcherReplaceSlot(t *testing.T) {
@@ -188,13 +131,15 @@ func TestDispatcherReplaceSlot(t *testing.T) {
 			t.Fatalf("expected slot 2 swapped for slot 3 in place, got %+v", got)
 		}
 
-		// Routing still works after the swap: active slot untouched, new
-		// member reachable once made active.
+		// Routing still works after the swap: round-robin's counter is
+		// fresh (0) and s1 sits at index 0, so the first route() after
+		// the swap still lands there - coincidence of index, not of
+		// "active slot" (route() no longer looks at d.active).
 		d.route(&Packet{Data: []byte("x"), N: 1})
 		select {
 		case <-s1.inbound:
 		default:
-			t.Fatal("expected packet still routed to unchanged active slot s1")
+			t.Fatal("expected packet routed to slot at round-robin index 0 (s1)")
 		}
 	})
 
@@ -220,22 +165,4 @@ func TestDispatcherReplaceSlot(t *testing.T) {
 			t.Fatalf("active slot must still be 2 (live traffic preserved), got %d", got)
 		}
 	})
-}
-
-func TestDispatcherFailoverFallsBackToNextWhenNoUpSignalKnown(t *testing.T) {
-	t.Parallel()
-	d := newDispatcher()
-	dead := &slotHandle{streamID: 1, inbound: make(chan *Packet)}
-	other := newTestSlot(2)
-	d.setSlots([]*slotHandle{dead, other}, 1)
-	// Ни один markUp не вызывался - failoverLocked не должен паниковать
-	// и должен просто уйти по кругу.
-
-	for i := 0; i < maxConsecutiveDropsBeforeFailover; i++ {
-		d.route(&Packet{Data: []byte("x"), N: 1})
-	}
-
-	if got := d.activeStreamID(); got != 2 {
-		t.Fatalf("expected fallback round-robin to streamID 2, got %d", got)
-	}
 }

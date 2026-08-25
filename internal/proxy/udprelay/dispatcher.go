@@ -3,7 +3,6 @@ package udprelay
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // slotHandle is what the dispatcher needs to route packets to, and observe
@@ -18,52 +17,38 @@ type slotHandle struct {
 	streamID int
 	inbound  chan *Packet  // dispatcher writes; DTLSLoop's write-goroutine reads it as its inboundChan
 	up       chan struct{} // DTLSLoop signals here on every successful handshake, including reconnects (its okchan)
+
+	// health - per-slot throughput+RTT signal (см. slothealth.go). Только
+	// логирование на Шаге 1 - route() его не читает.
+	health *slotHealth
 }
 
-// slotInboundBufferSize - маленький буфер на слот, НАМЕРЕННО мал: живой
-// слот (oneDTLS вычитывает inboundChan почти со скоростью сети) держит его
-// почти всегда пустым, а мёртвый (между reconnect-попытками DTLSLoop, до
-// 10-30s backoff) заполняет его за пару пакетов - переполнение служит
-// дешёвым сигналом "слот сейчас не читает", см. maxConsecutiveDropsBeforeFailover.
+// slotInboundBufferSize - маленький буфер на слот. Живой слот (oneDTLS
+// вычитывает inboundChan почти со скоростью сети) держит его почти всегда
+// пустым; мёртвый (между reconnect-попытками DTLSLoop, до 10-30s backoff)
+// заполняет его за пару пакетов и route() просто роняет пакет через
+// default - см. route().
 const slotInboundBufferSize = 4
 
-// rotateInterval - как долго активный слот остаётся активным до плановой
-// ротации на следующего кандидата hot-set'а. Триггер по ВРЕМЕНИ, не по
-// объёму байт: байтовый порог структурно смещён против цели "усреднение по
-// пулу" из спеки (docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
-// раздел "Интерпретация") - медленному пути дольше набрать тот же объём,
-// значит он и получает БОЛЬШЕ эфирного времени, а не меньше. Живой замер
-// throughput 2026-08-24 подтвердил эффект (0.3 МБ/с при 2МиБ-пороге, как
-// будто выдан один пир). Время даёт каждому кандидату РАВНОЕ эфирное время
-// вне зависимости от его скорости - корректная "усреднение по пулу".
-// НЕ окончательно откалибровано - стартовая точка. var (не const) только
-// затем, чтобы dispatcher_test.go мог временно подставить короткий интервал
-// вместо ожидания секунд в юнит-тесте - в бою значение не меняется.
-var rotateInterval = 1500 * time.Millisecond
-
-// maxConsecutiveDropsBeforeFailover - сколько подряд неудачных попыток
-// отдать пакет активному слоту считать его мёртвым и переключаться
-// немедленно, не дожидаясь плановой ротации по объёму.
-const maxConsecutiveDropsBeforeFailover = 5
-
 // dispatcher - единственный читатель общего inboundChan (см. run.go).
-// Владеет индексом активного слота hot-set'а, переключает его по
-// истечении времени, по ручному триггеру и по liveness-отказу активного
-// слота. Не открывает и не закрывает сами TURN/DTLS-сессии - этим
-// занимается sessionManager; dispatcher только маршрутизирует пакеты уже
-// поднятых слотов.
+// Маршрутизирует пакеты round-robin'ом по всем живым членам hot-set'а (см.
+// route()). active/rotateManual остаются только как учёт "какой слот
+// сейчас защищён от retire в replaceSlot" для sessionManager.refreshOne -
+// на фактическую маршрутизацию пакетов больше не влияют (см. route()'s
+// doc comment - разгрузка на единственный активный слот и её
+// liveness-failover убраны 2026-08-24 по прямой просьбе). Не открывает и
+// не закрывает сами TURN/DTLS-сессии - этим занимается sessionManager;
+// dispatcher только маршрутизирует пакеты уже поднятых слотов.
 type dispatcher struct {
 	mu     sync.Mutex
 	slots  []*slotHandle
 	active int
 
-	lastRotate       time.Time
-	consecutiveDrops int
-	lastUp           map[int]time.Time // streamID -> время последнего up-сигнала
+	roundRobin int // индекс для route()'s round-robin по всем слотам
 }
 
 func newDispatcher() *dispatcher {
-	return &dispatcher{lastUp: make(map[int]time.Time), lastRotate: time.Now()}
+	return &dispatcher{}
 }
 
 // setSlots (пере)задаёт состав hot-set'а. keepActiveStreamID - какой слот
@@ -81,8 +66,6 @@ func (d *dispatcher) setSlots(slots []*slotHandle, keepActiveStreamID int) {
 			break
 		}
 	}
-	d.lastRotate = time.Now()
-	d.consecutiveDrops = 0
 }
 
 // replaceSlot atomically retires oldStreamID and installs newSlot in its
@@ -107,7 +90,6 @@ func (d *dispatcher) replaceSlot(oldStreamID int, newSlot *slotHandle) bool {
 			copy(newSlots, d.slots)
 			newSlots[i] = newSlot
 			d.slots = newSlots
-			delete(d.lastUp, oldStreamID)
 			return true
 		}
 	}
@@ -136,38 +118,30 @@ func (d *dispatcher) activeStreamID() int {
 	return d.slots[d.active].streamID
 }
 
-// markUp записывает момент последнего успешного handshake слота streamID.
-// Вызывается отдельной горутиной-наблюдателем на каждый слот (см.
-// sessionManager.launchSlot) - фан-ин через мьютекс вместо динамического
-// select по растущему/убывающему числу каналов (состав hot-set'а меняется
-// во время refresh).
-func (d *dispatcher) markUp(streamID int, at time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.lastUp[streamID] = at
-}
-
-// rotateManual переключает активный слот немедленно, в обход таймера -
-// вызывается из run() при получении сигнала на rotateCh.
+// rotateManual сдвигает d.active на следующий слот по кругу - это больше не
+// влияет на маршрутизацию пакетов (см. route()), только на то, какой слот
+// replaceSlot защищает от retire. Оставлен как no-op в этом смысле для
+// совместимости с существующим ручным триггером (stdin 'rotate',
+// mobile.TriggerRotate) и тестами; вызывается из run() при получении
+// сигнала на rotateCh.
 func (d *dispatcher) rotateManual() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.rotateLocked()
-}
-
-// rotateLocked переключает активный индекс на следующий слот по кругу.
-// Вызывающий обязан держать d.mu.
-func (d *dispatcher) rotateLocked() {
 	if len(d.slots) == 0 {
 		return
 	}
 	d.active = (d.active + 1) % len(d.slots)
-	d.lastRotate = time.Now()
-	d.consecutiveDrops = 0
 }
 
-// route отдаёт один пакет активному слоту, проверяет, не истёк ли таймер
-// плановой ротации, и отслеживает подряд идущие отказы для liveness-failover.
+// route отдаёт один пакет очередному слоту round-robin'ом по ВСЕМ живым
+// членам hot-set'а. Разгрузка на единственный "активный" слот убрана по
+// прямой просьбе 2026-08-24 - она душила пропускную способность до
+// потолка одного relay-пути (единственный путь = единственная пропускная
+// способность, а не разнообразие, ради которого city заводился hot-set
+// изначально). Round-robin возвращает параллелизм ценой части
+// endpoint-стабильности на сервере, которую чинила session-affinity
+// (docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md) -
+// осознанный откат, не забытая недоделка.
 func (d *dispatcher) route(pkt *Packet) {
 	d.mu.Lock()
 	if len(d.slots) == 0 {
@@ -175,25 +149,14 @@ func (d *dispatcher) route(pkt *Packet) {
 		packetPool.Put(pkt)
 		return
 	}
-	active := d.slots[d.active]
+	target := d.slots[d.roundRobin%len(d.slots)]
+	d.roundRobin++
 	d.mu.Unlock()
 
 	select {
-	case active.inbound <- pkt:
-		d.mu.Lock()
-		d.consecutiveDrops = 0
-		if time.Since(d.lastRotate) >= rotateInterval {
-			d.rotateLocked()
-		}
-		d.mu.Unlock()
+	case target.inbound <- pkt:
 	default:
 		packetPool.Put(pkt)
-		d.mu.Lock()
-		d.consecutiveDrops++
-		if d.consecutiveDrops >= maxConsecutiveDropsBeforeFailover {
-			d.failoverLocked()
-		}
-		d.mu.Unlock()
 	}
 }
 
@@ -212,38 +175,4 @@ func (d *dispatcher) run(ctx context.Context, inboundChan <-chan *Packet, rotate
 			d.rotateManual()
 		}
 	}
-}
-
-// failoverLocked switches the active slot to the most recently up-signaled
-// among the OTHERS (never the one that just failed) - the best available
-// proxy for "pick a live one" without a separate down-signal (oneDTLS/
-// DTLSLoop don't expose one; adding it would mean changing their internals,
-// which this feature deliberately avoids - see loop.go's doc comment and
-// the spec's "no changes inside them" constraint). Falls back to plain
-// round-robin if no other slot has ever signaled up yet. Caller must hold d.mu.
-func (d *dispatcher) failoverLocked() {
-	if len(d.slots) <= 1 {
-		d.lastRotate = time.Now()
-		d.consecutiveDrops = 0
-		return
-	}
-	deadID := d.slots[d.active].streamID
-	best := -1
-	var bestTime time.Time
-	for i, s := range d.slots {
-		if s.streamID == deadID {
-			continue
-		}
-		if t := d.lastUp[s.streamID]; t.After(bestTime) {
-			bestTime = t
-			best = i
-		}
-	}
-	if best >= 0 {
-		d.active = best
-	} else {
-		d.active = (d.active + 1) % len(d.slots)
-	}
-	d.lastRotate = time.Now()
-	d.consecutiveDrops = 0
 }

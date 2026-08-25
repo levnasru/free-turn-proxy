@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 )
 
 // sessionManager владеет hot-set'ом (K живых DTLS+TURN слотов) и
@@ -67,16 +69,17 @@ func (sm *sessionManager) onAllocated(streamID int, addr *net.UDPAddr) {
 // вместо общего. barrierCh, если не nil, получает один сигнал при первом
 // успешном handshake этого слота - используется только для стартового
 // барьера первого слота hot-set'а (см. run(), тот же барьер, что раньше
-// был в Run() для стрима 1). Каждое успешное (пере)подключение слота
-// дополнительно отмечается в диспетчере через markUp для liveness-failover.
+// был в Run() для стрима 1).
 func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, streamID int, barrierCh chan<- struct{}) *slotHandle {
 	slotCtx, cancel := context.WithCancel(ctx)
 	sm.cancels[streamID] = cancel
 
+	health := newSlotHealth()
 	slot := &slotHandle{
 		streamID: streamID,
 		inbound:  make(chan *Packet, slotInboundBufferSize),
 		up:       make(chan struct{}, 1),
+		health:   health,
 	}
 
 	cchan := make(chan net.PacketConn)
@@ -88,7 +91,7 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		TURNLoop(slotCtx, sm.deps, sm.params, sm.peer, cchan, sm.t, streamID)
+		TURNLoop(slotCtx, sm.deps, sm.params, sm.peer, cchan, sm.t, streamID, health)
 	}()
 	wg.Add(1)
 	go func() {
@@ -99,7 +102,6 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 			case <-slotCtx.Done():
 				return
 			case <-slot.up:
-				sm.disp.markUp(streamID, time.Now())
 				if first && barrierCh != nil {
 					select {
 					case barrierCh <- struct{}{}:
@@ -144,6 +146,8 @@ func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, r
 		sm.disp.run(ctx, inboundChan, rotateCh)
 	}()
 
+	go sm.logHealthLoop(ctx)
+
 	sm.refreshLoop(ctx, &wg)
 
 	wg.Wait()
@@ -156,6 +160,32 @@ func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, r
 // эмпирической калибровки (см. dispatcher.go's rotateThresholdBytes comment
 // for the same caveat).
 const hotSetRefreshInterval = 5 * time.Minute
+
+// slotHealthLogInterval - как часто logHealthLoop печатает per-slot
+// throughput+RTT в Debug. Шаг 1: только видимость для живой проверки на
+// железе, ни на что не влияет.
+const slotHealthLogInterval = 5 * time.Second
+
+// logHealthLoop периодически логирует health (throughput+RTT) каждого члена
+// hot-set'а на уровне Debug - для живой проверки на реальном железе, что
+// сигнал вообще приходит вменяемым. Не читается ни route(), ни refreshOne -
+// Шаг 1 это чистая наблюдаемость, до градиента по K дело ещё не дошло.
+func (sm *sessionManager) logHealthLoop(ctx context.Context) {
+	ticker := time.NewTicker(slotHealthLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, s := range sm.disp.currentSlots() {
+				tx, rx := s.health.stats.Counters()
+				sm.deps.log().Debugf("[STREAM %d] health: rtt=%s tx=%s rx=%s",
+					s.streamID, s.health.rtt(), stats.FormatByteCount(tx), stats.FormatByteCount(rx))
+			}
+		}
+	}
+}
 
 // refreshLoop periodically calls refreshOne while ctx is alive. Runs on the
 // same goroutine as run() (called at the end of it, see Task 7) rather than

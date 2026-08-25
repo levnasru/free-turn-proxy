@@ -55,7 +55,7 @@ func DTLSLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr
 // тормозит через t (глобальный тик 200ms), выполняет одну TURN-сессию
 // и реагирует на provider.ErrFatalNoStreams / provider.ErrBackoffActive
 // соответственно.
-func TURNLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, connchan <-chan net.PacketConn, t <-chan time.Time, streamID int) {
+func TURNLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, connchan <-chan net.PacketConn, t <-chan time.Time, streamID int, health *slotHealth) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -67,7 +67,7 @@ func TURNLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr
 				return
 			}
 			c := make(chan error, 1)
-			go oneTURN(ctx, deps, params, peer, conn2, streamID, c)
+			go oneTURN(ctx, deps, params, peer, conn2, streamID, c, health)
 
 			var err error
 			select {
@@ -216,7 +216,13 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	return nil
 }
 
-func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, conn2 net.PacketConn, streamID int, c chan<- error) {
+// slotRTTProbeInterval - период STUN Binding-запросов (Stream.Ping) через
+// уже открытый TURN-клиент для замера RTT до relay-пути. Отдельно от
+// data-plane - лёгкий control-plane запрос, WG-байты не читает и не трогает.
+// НЕ откалибровано живым замером - стартовая точка для Шага 1.
+const slotRTTProbeInterval = 10 * time.Second
+
+func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, conn2 net.PacketConn, streamID int, c chan<- error, health *slotHealth) {
 	var err error
 	defer func() { c <- err }()
 	select {
@@ -287,6 +293,24 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		}
 	})
 
+	// RTT-пробник (Шаг 1): неудачный пинг - повод пропустить замер, а не
+	// рвать turnctx, поэтому без defer turncancel(), в отличие от двух
+	// data-pump горутин ниже.
+	wg.Go(func() {
+		ticker := time.NewTicker(slotRTTProbeInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-turnctx.Done():
+				return
+			case <-ticker.C:
+				if d, perr := stream.Ping(); perr == nil {
+					health.recordRTT(d)
+				}
+			}
+		}
+	})
+
 	wg.Go(func() {
 		defer turncancel()
 		// При obf читаем payload сразу в buf[HeaderLen:], чтобы WrapInPlace
@@ -333,6 +357,7 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			if params.TrafficStats != nil {
 				params.TrafficStats.AddTx(written)
 			}
+			health.stats.AddTx(written)
 			if err1 != nil {
 				return
 			}
@@ -369,6 +394,7 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 				if params.TrafficStats != nil {
 					params.TrafficStats.AddRx(len(payload))
 				}
+				health.stats.AddRx(len(payload))
 				if _, err := conn2.WriteTo(payload, addr); err != nil {
 					return
 				}
