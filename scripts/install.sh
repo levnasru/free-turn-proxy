@@ -363,11 +363,11 @@ validate_config() {
     [ -z "$BACKEND_PORT" ] && { [ "$PROXY_MODE" = "udp" ] && BACKEND_PORT="51820" || BACKEND_PORT="443"; }
     valid_port "$BACKEND_PORT" || die "backend-port невалиден: '$BACKEND_PORT'"
     case "$OBF_PROFILE" in
-        rtpopus)
+        rtpopus | rtpopus2 | rtpopus3)
             [ -z "$OBF_KEY" ] && { OBF_KEY="$(openssl rand -hex 32)"; log_info "Сгенерирован ключ обфускации."; }
             valid_hex64 "$OBF_KEY" || die "obf-key — ровно 64 hex-символа" ;;
         none) OBF_KEY="" ;;
-        *) die "obf: rtpopus|none, а не '$OBF_PROFILE'" ;;
+        *) die "obf: rtpopus|rtpopus2|rtpopus3|none, а не '$OBF_PROFILE'" ;;
     esac
     if [ "$WG_SETUP" = "1" ]; then
         [ "$PROXY_MODE" = "udp" ] || die "WireGuard bootstrap доступен только при -mode udp."
@@ -435,8 +435,10 @@ wizard_wireguard() {
 
 wizard_obfuscation() {
     ui_menu OBF_PROFILE "Профиль обфускации:" "$OBF_PROFILE" \
-        rtpopus "rtpopus  ·  RTP/opus + ChaCha20-Poly1305  (рекомендуется)" \
-        none    "none  ·  без обфускации"
+        rtpopus  "rtpopus  ·  RTP/opus + ChaCha20-Poly1305  (рекомендуется)" \
+        rtpopus2 "rtpopus2  ·  + RTP header extension (ближе к WebRTC)" \
+        rtpopus3 "rtpopus3  ·  + abs-send-time, VAD, имитация потерь" \
+        none     "none  ·  без обфускации"
     if [ "$OBF_PROFILE" = "none" ]; then
         OBF_KEY=""; return
     fi
@@ -889,7 +891,7 @@ Free Turn Proxy — установщик сервера.
   --mode   udp|tcp               режим (default udp)
   --backend-port N               порт бэкенда (default udp→51820 / tcp→443)
   --listen-port N                внешний порт (default 56000)
-  --obf rtpopus|none             обфускация (default rtpopus)
+  --obf rtpopus|rtpopus2|rtpopus3|none  обфускация (default rtpopus)
   --obf-key HEX64                ключ (нет → сгенерируется)
   --clients-auth | --no-clients-auth   авторизация Client ID (default off)
   --wireguard | --no-wireguard   поднять WG-сервер на backend-порту (udp; default off)
