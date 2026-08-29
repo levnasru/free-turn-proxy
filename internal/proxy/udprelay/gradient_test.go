@@ -52,7 +52,7 @@ func TestSuggestedHotSetSizeClampedToUpperBound(t *testing.T) {
 	}
 }
 
-func TestGradientTrackerResetsWindow(t *testing.T) {
+func TestGradientTrackerResetsWindowDownwardImmediate(t *testing.T) {
 	t.Parallel()
 	g := newGradientTracker()
 	g.observe(20 * time.Millisecond)
@@ -61,10 +61,46 @@ func TestGradientTrackerResetsWindow(t *testing.T) {
 		t.Fatalf("expected baseline to track the minimum observed, got %s", got)
 	}
 
-	// Форсируем истёкшее окно, минуя таймер.
+	// Форсируем истёкшее окно, минуя таймер. Сэмпл НИЖЕ старого дна - это
+	// ратчет вниз, он безопасен и применяется немедленно даже на тике сброса.
 	g.windowStart = time.Now().Add(-minRTTResetInterval - time.Second)
-	g.observe(15 * time.Millisecond)
-	if got := g.baseline(); got != 15*time.Millisecond {
-		t.Fatalf("expected baseline to reset after window expiry, got %s", got)
+	g.observe(5 * time.Millisecond)
+	if got := g.baseline(); got != 5*time.Millisecond {
+		t.Fatalf("expected immediate ratchet-down on reset tick, got %s", got)
+	}
+}
+
+func TestGradientTrackerResetsWindowUpwardSettles(t *testing.T) {
+	t.Parallel()
+	g := newGradientTracker()
+	g.observe(10 * time.Millisecond)
+	if got := g.baseline(); got != 10*time.Millisecond {
+		t.Fatalf("expected baseline 10ms before reset, got %s", got)
+	}
+
+	// Форсируем истёкшее окно на тике, совпавшем с плохим сэмплом (сценарий
+	// живого лога Рената 2026-08-29: сброс попал на avgRTT~1200ms посреди
+	// outage). Старое дно должно остаться авторитетным - иначе gradient
+	// мгновенно взлетает до 1.200, "здоровый канал", в разгар outage.
+	g.windowStart = time.Now().Add(-minRTTResetInterval - time.Second)
+	g.observe(1200 * time.Millisecond)
+	if got := g.baseline(); got != 10*time.Millisecond {
+		t.Fatalf("expected old baseline to survive a bad sample on the reset tick, got %s", got)
+	}
+
+	// Ещё gradientResetSettleSamples-1 сэмплов в том же духе - settle-период
+	// не финализирован, старое дно всё ещё держится.
+	for i := 0; i < gradientResetSettleSamples-2; i++ {
+		g.observe(1100 * time.Millisecond)
+		if got := g.baseline(); got != 10*time.Millisecond {
+			t.Fatalf("expected old baseline to hold mid-settle, got %s", got)
+		}
+	}
+
+	// Финализирующий сэмпл settle-периода - новое дно становится минимумом
+	// накопленных за settle сэмплов, а не первым попавшимся.
+	g.observe(900 * time.Millisecond)
+	if got := g.baseline(); got != 900*time.Millisecond {
+		t.Fatalf("expected settled baseline to be the min of the settle window, got %s", got)
 	}
 }

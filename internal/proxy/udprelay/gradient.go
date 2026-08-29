@@ -56,12 +56,28 @@ const minRTTResetInterval = 15 * time.Minute
 // считать деградацией (терпимость к обычному джиттеру). НЕ откалибровано.
 const gradientBufferFraction = 0.2
 
+// gradientResetSettleSamples - сколько сэмплов подряд после истечения окна
+// накапливаем в кандидата на новое дно, прежде чем сделать его авторитетным
+// baseline. Без этого один сэмпл, совпавший по времени со сбросом окна,
+// немедленно становится "новым дном" - живой лог Рената (2026-08-29,
+// gradient-log.csv) поймал именно это: сброс попал на avgRTT=1197ms посреди
+// часового outage, minRTT стал 1197ms и держал gradient=1.200 ("канал в
+// идеальном здоровье") все следующие 15 минут, хотя канал был мёртв.
+// Улучшение (сэмпл ниже текущего дна) принимается немедленно всегда - это
+// трещотка вниз, она безопасна (см. живые прогоны 2026-08-25 выше). Опасно
+// только движение ВВЕРХ дна - его теперь придерживаем settle-периодом.
+// НЕ откалибровано живым замером, как и остальные константы в этом файле.
+const gradientResetSettleSamples = 3
+
 // gradientTracker хранит скользящий baseline (минимум среднего RTT hot-set'а)
 // с периодическим сбросом окна.
 type gradientTracker struct {
 	mu          sync.Mutex
 	minRTT      time.Duration
 	windowStart time.Time
+
+	settlePending time.Duration // кандидат на новое (более высокое) дно после сброса окна
+	settleCount   int           // сэмплов накоплено в кандидата; 0 = не в settle-режиме
 }
 
 func newGradientTracker() *gradientTracker {
@@ -69,13 +85,34 @@ func newGradientTracker() *gradientTracker {
 }
 
 // observe обновляет baseline очередным средним RTT hot-set'а за тик.
+//
+// Ратчет вниз (avgRTT < текущее дно) принимается всегда немедленно - это
+// безопасно, см. живые прогоны 2026-08-25 в комментарии выше про
+// minRTTResetInterval. Движение дна ВВЕРХ (после истечения окна) - нет:
+// первый сэмпл после сброса только открывает settle-период
+// (gradientResetSettleSamples сэмплов), старое дно остаётся авторитетным
+// (baseline() возвращает его), пока settle не наберёт нужное число сэмплов -
+// тогда новым дном становится их минимум, а не первый попавшийся.
 func (g *gradientTracker) observe(avgRTT time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if time.Since(g.windowStart) >= minRTTResetInterval {
-		g.minRTT = 0
+
+	if g.settleCount == 0 && time.Since(g.windowStart) >= minRTTResetInterval {
 		g.windowStart = time.Now()
+		g.settlePending = avgRTT
+		g.settleCount = 1
+	} else if g.settleCount > 0 {
+		if avgRTT < g.settlePending {
+			g.settlePending = avgRTT
+		}
+		g.settleCount++
+		if g.settleCount >= gradientResetSettleSamples {
+			g.minRTT = g.settlePending
+			g.settleCount = 0
+			return
+		}
 	}
+
 	if g.minRTT == 0 || avgRTT < g.minRTT {
 		g.minRTT = avgRTT
 	}
