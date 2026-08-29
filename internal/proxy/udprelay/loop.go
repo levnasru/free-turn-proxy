@@ -231,7 +231,7 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		err = ctx.Err()
 		return
 	}
-	stream, err1 := common.DialTURN(ctx, params.Host, params.Port, params.TransportUDP, peer, streamID, params.GetCreds)
+	stream, err1 := common.DialTURN(ctx, params.Host, params.Port, params.TransportUDP, peer, streamID, 0, params.GetCreds)
 	if err1 != nil {
 		if deps.Auth.IsAuthError(err1) {
 			deps.Auth.HandleAuthError(streamID)

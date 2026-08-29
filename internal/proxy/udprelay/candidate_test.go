@@ -102,6 +102,62 @@ func TestShouldRefresh(t *testing.T) {
 	}
 }
 
+func TestPickAgeExpiredCandidate(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	margin := 4 * time.Hour
+
+	t.Run("nothing past margin yet", func(t *testing.T) {
+		t.Parallel()
+		launchedAt := map[int]time.Time{1: base, 2: base.Add(-1 * time.Hour)}
+		got := pickAgeExpiredCandidate([]int{1, 2}, launchedAt, base.Add(2*time.Hour), margin)
+		if got != -1 {
+			t.Errorf("got %d, want -1 (nothing older than margin yet)", got)
+		}
+	})
+
+	t.Run("one slot past margin gets picked", func(t *testing.T) {
+		t.Parallel()
+		launchedAt := map[int]time.Time{1: base, 2: base.Add(1 * time.Hour)}
+		now := base.Add(5 * time.Hour) // slot 1 is 5h old (past margin), slot 2 is 4h old (exactly at margin)
+		got := pickAgeExpiredCandidate([]int{1, 2}, launchedAt, now, margin)
+		if got != 1 {
+			t.Errorf("got %d, want 1 (oldest, past margin)", got)
+		}
+	})
+
+	t.Run("multiple past margin - picks the oldest", func(t *testing.T) {
+		t.Parallel()
+		launchedAt := map[int]time.Time{
+			1: base.Add(-6 * time.Hour),
+			2: base.Add(-5 * time.Hour),
+			3: base, // not yet past margin
+		}
+		got := pickAgeExpiredCandidate([]int{1, 2, 3}, launchedAt, base, margin)
+		if got != 1 {
+			t.Errorf("got %d, want 1 (oldest of the two past-margin slots)", got)
+		}
+	})
+
+	t.Run("does not exempt the active streamID", func(t *testing.T) {
+		t.Parallel()
+		launchedAt := map[int]time.Time{1: base.Add(-5 * time.Hour)}
+		got := pickAgeExpiredCandidate([]int{1}, launchedAt, base, margin)
+		if got != 1 {
+			t.Errorf("got %d, want 1 - age-based rotation must not exempt the active slot", got)
+		}
+	})
+
+	t.Run("streamID missing from launchedAt is skipped, not guessed", func(t *testing.T) {
+		t.Parallel()
+		launchedAt := map[int]time.Time{1: base.Add(-5 * time.Hour)}
+		got := pickAgeExpiredCandidate([]int{1, 2}, launchedAt, base, margin)
+		if got != 1 {
+			t.Errorf("got %d, want 1 (streamID 2 has no known launch time)", got)
+		}
+	})
+}
+
 func TestPickSlotToRetireForShrink(t *testing.T) {
 	t.Parallel()
 

@@ -63,6 +63,36 @@ func pickReplacementCandidate(streamIDs []int, activeStreamID int, groups map[in
 	return best
 }
 
+// pickAgeExpiredCandidate returns the streamID of the OLDEST hot-set member
+// whose age (now - launchedAt) is at or past margin, or -1 if none qualify
+// yet (P14, 2026-08-29: no TURN allocation should silently outlive
+// common.CredentialSafetyMargin). Unlike pickReplacementCandidate's
+// group-diversity heuristic - which permanently stalls once the pool is
+// fully spread across groups, see its doc comment - age always eventually
+// fires regardless of group convergence, so refreshOne tries this first and
+// only falls back to diversity when nothing is age-eligible. Deliberately
+// does NOT exempt the dispatcher's active streamID: post-round-robin-rollback
+// "active" carries no routing weight (see dispatcher.route()'s doc comment),
+// so refreshOne is responsible for calling dispatcher.rotateManual() before
+// retiring a chosen slot that happens to be active, rather than this
+// function silently protecting it forever. A streamID missing from
+// launchedAt (still connecting) is skipped, not guessed.
+func pickAgeExpiredCandidate(streamIDs []int, launchedAt map[int]time.Time, now time.Time, margin time.Duration) int {
+	oldestID := -1
+	var oldestAge time.Duration
+	for _, id := range streamIDs {
+		t, ok := launchedAt[id]
+		if !ok {
+			continue
+		}
+		if age := now.Sub(t); age >= margin && age > oldestAge {
+			oldestAge = age
+			oldestID = id
+		}
+	}
+	return oldestID
+}
+
 // pickSlotToRetireForShrink chooses which hot-set member to drop when
 // shrinking K by one (Шаг 3, живой ресайз): the one with the worst measured
 // RTT (see slotHealth) - the whole point of shrinking is to walk away from

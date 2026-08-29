@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 )
 
@@ -80,10 +81,11 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 
 	health := newSlotHealth()
 	slot := &slotHandle{
-		streamID: streamID,
-		inbound:  make(chan *Packet, slotInboundBufferSize),
-		up:       make(chan struct{}, 1),
-		health:   health,
+		streamID:   streamID,
+		inbound:    make(chan *Packet, slotInboundBufferSize),
+		up:         make(chan struct{}, 1),
+		health:     health,
+		launchedAt: time.Now(),
 	}
 
 	cchan := make(chan net.PacketConn)
@@ -345,34 +347,53 @@ func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, g
 	}
 }
 
-// refreshOne retires one non-active, group-over-represented hot-set member
-// (see pickReplacementCandidate) and launches a fresh candidate (next
-// sequential streamID) in its place. A no-op if nothing is clearly
-// over-represented right now, or if the dispatcher's active slot changed
-// between the read and the retire decision (see dispatcher.replaceSlot -
-// closes a TOCTOU window that could otherwise tear down a slot the
-// dispatcher had just rotated onto).
+// refreshOne retires one hot-set member and launches a fresh candidate (next
+// sequential streamID) in its place. Two triggers, tried in order:
+//
+//  1. Age (pickAgeExpiredCandidate, P14 2026-08-29) - any slot alive past
+//     common.CredentialSafetyMargin, oldest first. Takes priority because it
+//     always eventually fires, unlike (2).
+//  2. Diversity (pickReplacementCandidate) - retires an over-represented
+//     group's member. Falls back to this only when nothing is age-eligible;
+//     stalls permanently once the pool is fully spread across groups (see
+//     its doc comment), which is exactly why (1) exists as a backstop.
+//
+// Neither picker exempts the dispatcher's active streamID (see their doc
+// comments) - if the chosen retireID happens to be active, rotateManual()
+// moves the pointer off it first (active carries no routing weight
+// post-round-robin-rollback, see dispatcher.route()), so replaceSlot's own
+// TOCTOU guard doesn't reject a legitimate, deliberately-chosen retirement.
+// A no-op if nothing is eligible, or if the dispatcher's active slot changed
+// again between that rotateManual() and replaceSlot's actual swap (same
+// TOCTOU class replaceSlot always guards against).
 func (sm *sessionManager) refreshOne(ctx context.Context, wg *sync.WaitGroup) {
 	slots := sm.disp.currentSlots()
 	if len(slots) == 0 {
 		return
 	}
 	ids := make([]int, len(slots))
+	launchedAt := make(map[int]time.Time, len(slots))
 	for i, s := range slots {
 		ids[i] = s.streamID
+		launchedAt[s.streamID] = s.launchedAt
 	}
 	active := sm.disp.activeStreamID()
 
-	sm.mu.Lock()
-	groupsCopy := make(map[int]string, len(sm.groups))
-	for k, v := range sm.groups {
-		groupsCopy[k] = v
+	retireID := pickAgeExpiredCandidate(ids, launchedAt, time.Now(), common.CredentialSafetyMargin)
+	if retireID < 0 {
+		sm.mu.Lock()
+		groupsCopy := make(map[int]string, len(sm.groups))
+		for k, v := range sm.groups {
+			groupsCopy[k] = v
+		}
+		sm.mu.Unlock()
+		retireID = pickReplacementCandidate(ids, active, groupsCopy)
 	}
-	sm.mu.Unlock()
-
-	retireID := pickReplacementCandidate(ids, active, groupsCopy)
 	if retireID < 0 {
 		return
+	}
+	if retireID == active {
+		sm.disp.rotateManual()
 	}
 
 	sm.nextID++

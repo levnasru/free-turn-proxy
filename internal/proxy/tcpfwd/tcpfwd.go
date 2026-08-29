@@ -197,10 +197,32 @@ func Run(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, lis
 	}
 }
 
+// rotateStaggerBuckets - на сколько долей CredentialSafetyMargin размазан
+// сдвиг принудительного редайла между стримами (см. sessionRotateDeadline) -
+// без этого все N сессий, стартовавшие почти одновременно, форсированно
+// переподключались бы в одну и ту же секунду.
+const rotateStaggerBuckets = 10
+
+// sessionRotateDeadline - момент, когда стрим streamID обязан переподключиться
+// после connectedAt, даже если сессия полностью здорова (P14, 2026-08-29: не
+// сидеть на одном TURN-allocation дольше CredentialSafetyMargin - см. её
+// doc-comment в internal/proxy/common). Сдвиг по streamID%rotateStaggerBuckets
+// разносит редайл каждого стрима на свою долю margin вместо одновременного.
+func sessionRotateDeadline(connectedAt time.Time, streamID int) time.Time {
+	margin := common.CredentialSafetyMargin
+	stagger := time.Duration(streamID%rotateStaggerBuckets) * (margin / rotateStaggerBuckets)
+	return connectedAt.Add(margin).Add(stagger)
+}
+
 // maintainSession поддерживает одну TURN+DTLS+KCP+smux сессию живой:
 // 3s backoff при ошибке инициализации, 2s после отключения успешной сессии,
-// в обоих случаях перед следующей попыткой подключения.
+// в обоих случаях перед следующей попыткой подключения. generation
+// увеличивается на каждый редайл (организованный сбоем или добровольный по
+// возрасту) и идёт в DialTURN как candidateOffset - иначе повторный дайл того
+// же streamID каждый раз возвращался бы на тот же relay (см. DialTURN's
+// doc-comment).
 func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, id int, pool *SessionPool) {
+	generation := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -208,7 +230,8 @@ func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.
 		default:
 		}
 
-		smuxSess, cleanup, err := createSmuxSession(ctx, deps, params, peer, id)
+		smuxSess, cleanup, err := createSmuxSession(ctx, deps, params, peer, id, generation)
+		generation++
 		if err != nil {
 			wait := 3 * time.Second
 			if errors.Is(err, provider.ErrBackoffActive) {
@@ -234,6 +257,8 @@ func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.
 		ps := pool.Add(id, smuxSess)
 		deps.log().Infof("[session %d] connected (active: %d)", id, pool.Count())
 
+		rotateAt := sessionRotateDeadline(time.Now(), id)
+		voluntaryRotation := false
 		for !smuxSess.IsClosed() {
 			select {
 			case <-ctx.Done():
@@ -242,11 +267,20 @@ func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.
 				return
 			case <-time.After(1 * time.Second):
 			}
+			if time.Now().After(rotateAt) {
+				voluntaryRotation = true
+				break
+			}
 		}
 
 		pool.Remove(ps)
 		cleanup()
-		deps.log().Infof("[session %d] disconnected (active: %d), reconnecting...", id, pool.Count())
+		if voluntaryRotation {
+			deps.log().Infof("[session %d] voluntary rotation after %s (active: %d), reconnecting...",
+				id, common.CredentialSafetyMargin, pool.Count())
+		} else {
+			deps.log().Infof("[session %d] disconnected (active: %d), reconnecting...", id, pool.Count())
+		}
 
 		select {
 		case <-ctx.Done():
@@ -257,8 +291,9 @@ func maintainSession(ctx context.Context, deps *Deps, params *Params, peer *net.
 }
 
 // createSmuxSession создаёт полный TURN+DTLS+KCP+smux pipeline и возвращает
-// smux-сессию вместе с функцией cleanup (LIFO-разрушение).
-func createSmuxSession(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, id int) (*smux.Session, func(), error) {
+// smux-сессию вместе с функцией cleanup (LIFO-разрушение). candidateOffset
+// прокидывается в DialTURN как есть - см. maintainSession's generation.
+func createSmuxSession(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, id, candidateOffset int) (*smux.Session, func(), error) {
 	var cleanupFns []func()
 	cleanup := func() {
 		for i := len(cleanupFns) - 1; i >= 0; i-- {
@@ -266,7 +301,7 @@ func createSmuxSession(ctx context.Context, deps *Deps, params *Params, peer *ne
 		}
 	}
 
-	stream, err := common.DialTURN(ctx, params.Host, params.Port, params.TransportUDP, peer, id, params.GetCreds)
+	stream, err := common.DialTURN(ctx, params.Host, params.Port, params.TransportUDP, peer, id, candidateOffset, params.GetCreds)
 	if err != nil {
 		if deps.Auth.IsAuthError(err) {
 			deps.Auth.HandleAuthError(id)

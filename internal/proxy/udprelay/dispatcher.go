@@ -3,6 +3,7 @@ package udprelay
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // slotHandle is what the dispatcher needs to route packets to, and observe
@@ -21,6 +22,12 @@ type slotHandle struct {
 	// health - per-slot throughput+RTT signal (см. slothealth.go). Только
 	// логирование на Шаге 1 - route() его не читает.
 	health *slotHealth
+
+	// launchedAt - когда sessionManager.launchSlot поднял этот слот. Только
+	// для refreshOne's pickAgeExpiredCandidate (P14, 2026-08-29) - route() его
+	// не читает. Пишется один раз при создании, до публикации слота в
+	// dispatcher, дальше не мутируется - читать без мьютекса безопасно.
+	launchedAt time.Time
 }
 
 // slotInboundBufferSize - маленький буфер на слот. Живой слот (oneDTLS
