@@ -87,14 +87,17 @@ func TestHeaderShape(t *testing.T) {
 	if buf[12] != 0xBE || buf[13] != 0xDE {
 		t.Errorf("ext profile = 0x%02x%02x, want 0xBEDE", buf[12], buf[13])
 	}
-	if w := binary.BigEndian.Uint16(buf[14:16]); w != 3 {
-		t.Errorf("ext length = %d words, want 3", w)
+	if w := binary.BigEndian.Uint16(buf[14:16]); w != 4 {
+		t.Errorf("ext length = %d words, want 4", w)
 	}
-	if buf[16] != extAudioLevelHdr || buf[18] != extTransportHdr || buf[21] != extAbsSendTimeHdr {
-		t.Errorf("ext element headers = 0x%02x 0x%02x 0x%02x, want 0x10 0x21 0x32",
-			buf[16], buf[18], buf[21])
+	if buf[16] != extAudioLevelHdr || buf[18] != extTransportHdr || buf[21] != extAbsSendTimeHdr || buf[25] != extMidHdr {
+		t.Errorf("ext element headers = 0x%02x 0x%02x 0x%02x 0x%02x, want 0x10 0x21 0x32 0x40",
+			buf[16], buf[18], buf[21], buf[25])
 	}
-	if buf[28]&0x80 != 0 {
+	if buf[26] != midValue {
+		t.Errorf("sdes:mid value = 0x%02x, want 0x%02x ('0')", buf[26], byte(midValue))
+	}
+	if buf[32]&0x80 != 0 {
 		t.Errorf("client nonce sessionID MSB set, want clear (direction bit)")
 	}
 }
@@ -109,7 +112,7 @@ func TestServerDirectionBit(t *testing.T) {
 	if _, err := srv.WrapInPlace(buf, len(payload)); err != nil {
 		t.Fatal(err)
 	}
-	if buf[28]&0x80 == 0 {
+	if buf[32]&0x80 == 0 {
 		t.Errorf("server nonce sessionID MSB clear, want set (direction bit)")
 	}
 }

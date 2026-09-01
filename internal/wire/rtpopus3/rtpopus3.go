@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 
 // Package rtpopus3 - wire-профиль обфускации с улучшенной RTP-мимикрией:
-// три one-byte extension (audio-level, transport-wide-cc, abs-send-time),
-// вариативный шаг timestamp, эмуляция потери пакетов (gaps в seq),
-// VAD-модель с переключением silence/speech.
+// четыре one-byte extension (audio-level, transport-wide-cc, abs-send-time,
+// sdes:mid), вариативный шаг timestamp, эмуляция потери пакетов (gaps в
+// seq), VAD-модель с переключением silence/speech.
 //
-// Wire-формат (HeaderLen=40, Overhead=56):
+// Wire-формат (HeaderLen=44, Overhead=60):
 //
-//	[12B RTP hdr | 16B one-byte ext | 12B explicit nonce | AEAD ciphertext | 16B tag]
+//	[12B RTP hdr | 20B one-byte ext | 12B explicit nonce | AEAD ciphertext | 16B tag]
 //
 // RTP header (RFC 3550):
 //
@@ -17,20 +17,22 @@
 //	byte 4-7:  ts32 BE     вариативный шаг 480/960/1920 (10/20/40ms)
 //	byte 8-11: SSRC        полностью random per conn
 //
-// RTP extension (RFC 8285 one-byte, 12 байт данных -> 3 слова):
+// RTP extension (RFC 8285 one-byte, 16 байт данных -> 4 слова):
 //
 //	byte 12-13: 0xBE 0xDE      профиль one-byte
-//	byte 14-15: 0x0003         длина = 3 слова (12 байт данных)
+//	byte 14-15: 0x0004         длина = 4 слова (16 байт данных)
 //	byte 16:    0x10           ssrc-audio-level: id=1, len=1
 //	byte 17:    0x80|level     VAD + level (-dBov)
 //	byte 18:    0x21           transport-wide-cc: id=2, len=2
 //	byte 19-20: tccSeq16       монотонный transport-cc sequence
 //	byte 21:    0x32           abs-send-time: id=3, len=2
 //	byte 22-24: abs_send_time  24-bit NTP timestamp (mod 64s)
-//	byte 25-27: 0x00           padding до 12 байт данных расширения
+//	byte 25:    0x40           sdes:mid: id=4, len=1
+//	byte 26:    '0'            mid-тег (совпадает с реальным VK BUNDLE, см. отчёт)
+//	byte 27-31: 0x00           padding до 16 байт данных расширения
 //
 // 12B explicit nonce = 4B sessionID || 8B counter (BE). MSB sessionID
-// кодирует направление. AAD = первые 40 байт (RTP hdr || ext || nonce).
+// кодирует направление. AAD = первые 44 байта (RTP hdr || ext || nonce).
 package rtpopus3
 
 import (
@@ -49,11 +51,11 @@ import (
 const (
 	KeyLen    = 32
 	rtpHdrLen = 12
-	rtpExtLen = 16
+	rtpExtLen = 20
 	nonceLen  = 12
 	tagLen    = 16
-	headerLen = rtpHdrLen + rtpExtLen + nonceLen // 40
-	overhead  = headerLen + tagLen               // 56
+	headerLen = rtpHdrLen + rtpExtLen + nonceLen // 44
+	overhead  = headerLen + tagLen               // 60
 	rtpVerExt = 0x90                             // V=2, P=0, X=1, CC=0
 	rtpPT     = 0x6F                             // M=0, PT=111 (opus)
 	rtpMarker = 0x80                             // M=1
@@ -61,6 +63,8 @@ const (
 	extAudioLevelHdr  = 0x10 // id=1, len=1
 	extTransportHdr   = 0x21 // id=2, len=2
 	extAbsSendTimeHdr = 0x32 // id=3, len=2
+	extMidHdr         = 0x40 // id=4, len=1 (sdes:mid, RFC 8285)
+	midValue          = '0'  // mid-тег; реальный VK BUNDLE использует "0" для первого m-line
 
 	speechMinPkts  = 30
 	speechMaxPkts  = 200
@@ -280,7 +284,7 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 
 	buf[12] = 0xBE
 	buf[13] = 0xDE
-	binary.BigEndian.PutUint16(buf[14:16], 3)
+	binary.BigEndian.PutUint16(buf[14:16], 4)
 	buf[16] = extAudioLevelHdr
 	buf[17] = level
 	buf[18] = extTransportHdr
@@ -288,12 +292,14 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	buf[21] = extAbsSendTimeHdr
 	ast := c.absSendTime()
 	buf[22], buf[23], buf[24] = byte(ast>>16), byte(ast>>8), byte(ast) //nolint:gosec // 24-bit abs-send-time
-	buf[25], buf[26], buf[27] = 0, 0, 0
+	buf[25] = extMidHdr
+	buf[26] = midValue
+	buf[27], buf[28], buf[29], buf[30], buf[31] = 0, 0, 0, 0, 0
 
-	copy(buf[28:32], c.sessionID[:])
-	binary.BigEndian.PutUint64(buf[32:headerLen], ctr)
+	copy(buf[32:36], c.sessionID[:])
+	binary.BigEndian.PutUint64(buf[36:headerLen], ctr)
 
-	nonce := buf[28:headerLen]
+	nonce := buf[32:headerLen]
 	aad := buf[:headerLen]
 	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+plainLen], aad)
 	return wireLen, nil
@@ -316,7 +322,7 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	if len(wire) < overhead {
 		return nil, errors.New("rtpopus3:packet too short")
 	}
-	nonce := wire[28:headerLen]
+	nonce := wire[32:headerLen]
 	aad := wire[:headerLen]
 	ct := wire[headerLen:]
 
