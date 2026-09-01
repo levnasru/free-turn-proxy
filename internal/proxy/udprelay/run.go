@@ -62,10 +62,18 @@ type Params struct {
 
 	// GrowCh/ShrinkCh, если заданы, - ручной триггер живого ресайза
 	// hot-set'а на ±1 (Шаг 3, см. sessionManager.growHotSet/shrinkHotSet).
-	// Пока не подключены к gradientLoop's предложению - только ручной ввод.
+	// Ручной ввод идёт наравне с автоскейлером (Шаг 4), не вместо него:
+	// вручную можно выйти за его потолок, и тогда он сам утянет K обратно.
 	// nil - ресайза нет (как и у RotateCh).
 	GrowCh   <-chan struct{}
 	ShrinkCh <-chan struct{}
+
+	// AutoToggleCh, если задан, переключает автоскейлер K (Шаг 4, см.
+	// autoscale.go) вкл/выкл на живую по каждому сигналу. Автоскейлер
+	// включён при старте, так что первый сигнал его ВЫКЛЮЧАЕТ; выключенный
+	// продолжает считать и логировать решения, но не применяет их. nil -
+	// тумблера нет, автоскейлер работает.
+	AutoToggleCh <-chan struct{}
 }
 
 // streamStartBarrier - максимум, который стримы 2..N ждут прогрева кэша
@@ -147,7 +155,7 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 	sm := newSessionManager(deps, params, peer, listenConn, hotSetK, t)
 	params.OnAllocated = sm.onAllocated
 	wg.Go(func() {
-		sm.run(runCtx, inboundChan, params.RotateCh, params.GrowCh, params.ShrinkCh)
+		sm.run(runCtx, inboundChan, params.RotateCh, params.GrowCh, params.ShrinkCh, params.AutoToggleCh)
 	})
 
 	// При фатальной ошибке отменяем остальные горутины и пробрасываем наверх.

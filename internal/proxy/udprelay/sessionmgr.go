@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
@@ -32,6 +33,19 @@ type sessionManager struct {
 	disp *dispatcher
 	grad *gradientTracker // Шаг 2: скользящий RTT-baseline для gradientLoop
 
+	// Шаг 4: решающий слой между предложением градиента и реальным ресайзом.
+	// baseK - стартовое K (= cfg.TURN.N), из него считаются пол и потолок;
+	// неизменен после конструктора, поэтому читается без синхронизации.
+	// auto трогает только горутина gradientLoop. autoEnabled - живой тумблер
+	// (stdin-команда "auto"), пишется из refreshLoop, читается из
+	// gradientLoop, отсюда atomic. autoCh - решение gradientLoop'а на
+	// применение в refreshLoop: сам ресайз обязан идти из горутины run()'s,
+	// потому что трогает nextID/cancels (см. комментарий к полям ниже).
+	baseK       int
+	auto        *autoscaleDecider
+	autoEnabled atomic.Bool
+	autoCh      chan int
+
 	nextID int // следующий свободный streamID; трогает только run()'s горутина
 
 	mu      sync.Mutex // защищает только groups - onAllocated зовётся из per-slot горутин
@@ -43,7 +57,7 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 	if k <= 0 {
 		k = 1
 	}
-	return &sessionManager{
+	sm := &sessionManager{
 		deps:       deps,
 		params:     params,
 		peer:       peer,
@@ -52,9 +66,17 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 		t:          t,
 		disp:       newDispatcher(),
 		grad:       newGradientTracker(),
+		baseK:      k,
+		auto:       &autoscaleDecider{},
+		autoCh:     make(chan int, 1),
 		groups:     make(map[int]string),
 		cancels:    make(map[int]context.CancelFunc),
 	}
+	// Автоскейлер включён по умолчанию: без этого Шаг 4 на Android'е (где
+	// stdin есть только у ядра-подпроцесса, а кнопки в UI пока нет) остался бы
+	// мёртвым кодом. Выключается на живую stdin-командой "auto".
+	sm.autoEnabled.Store(true)
+	return sm
 }
 
 // onAllocated записывается в sm.params.OnAllocated до запуска первого
@@ -127,9 +149,10 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 // запуском 2..N), затем оставшиеся K-1 сразу следом. После этого ведёт
 // dispatcher и refresh-цикл (см. Task 8's refreshOne) до отмены ctx. growCh/
 // shrinkCh - ручной триггер живого ресайза hot-set'а (Шаг 3, см.
-// growHotSet/shrinkHotSet); nil-канал блокируется в select навсегда -
-// безопасно, TCP+bond ими не пользуется, как и rotateCh.
-func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, rotateCh, growCh, shrinkCh <-chan struct{}) {
+// growHotSet/shrinkHotSet), autoToggleCh - тумблер автоскейлера (Шаг 4);
+// nil-канал блокируется в select навсегда - безопасно, TCP+bond ими не
+// пользуется, как и rotateCh.
+func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, rotateCh, growCh, shrinkCh, autoToggleCh <-chan struct{}) {
 	wg := sync.WaitGroup{}
 	sm.nextID = 1
 
@@ -158,7 +181,7 @@ func (sm *sessionManager) run(ctx context.Context, inboundChan <-chan *Packet, r
 	go sm.logHealthLoop(ctx)
 	go sm.gradientLoop(ctx)
 
-	sm.refreshLoop(ctx, &wg, growCh, shrinkCh)
+	sm.refreshLoop(ctx, &wg, growCh, shrinkCh, autoToggleCh)
 
 	wg.Wait()
 	<-dispDone
@@ -251,12 +274,17 @@ func (sm *sessionManager) logHealthLoop(ctx context.Context) {
 // каждые 5с. НЕ откалибровано живым замером.
 const gradientLogInterval = 30 * time.Second
 
-// gradientLoop - Шаг 2: раз в gradientLogInterval считает средний RTT по
-// текущему hot-set'у, кормит им скользящий baseline (sm.grad) и логирует,
-// каким K предложил бы себя видеть gradient-контроллер - НЕ применяет
-// предложение, sm.k и реальный размер hot-set'а этим циклом не трогаются.
-// См. gradient.go про формулу и её ограничение (RTT неотличим от честной
-// загруженности канала).
+// gradientLoop - раз в gradientLogInterval считает средний RTT по текущему
+// hot-set'у, кормит им скользящий baseline (sm.grad) и отдаёт получившийся
+// gradient решающему слою Шага 4 (autoDecide -> autoscaleDecider). Сам ресайз
+// не делает: решение уходит в sm.autoCh, применяет его refreshLoop, у которого
+// на это есть право (nextID/cancels). См. gradient.go про формулу и её
+// ограничение (RTT неотличим от честной загруженности канала), autoscale.go -
+// про пороги, гистерезис и кулдаун.
+//
+// K берётся как len(slots), а НЕ sm.k: sm.k пишут growHotSet/shrinkHotSet из
+// горутины run()'s, читать его отсюда было гонкой (существовала с Шага 2).
+// Реальный размер hot-set'а и так живёт в диспетчере.
 func (sm *sessionManager) gradientLoop(ctx context.Context) {
 	ticker := time.NewTicker(gradientLogInterval)
 	defer ticker.Stop()
@@ -266,6 +294,7 @@ func (sm *sessionManager) gradientLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			slots := sm.disp.currentSlots()
+			k := len(slots)
 			var sum time.Duration
 			var n int
 			for _, s := range slots {
@@ -275,22 +304,84 @@ func (sm *sessionManager) gradientLoop(ctx context.Context) {
 				}
 			}
 			if n == 0 {
+				// Ни одного слота с измеренным RTT: сигнала нет. Тик всё
+				// равно отдаём решающему слою нейтралью - иначе внутри него
+				// стоит время, и кулдаун после длинного провала окажется
+				// "уже истёкшим" по данным, которых не было.
+				sm.autoDecide(0, k)
 				continue
 			}
 			avgRTT := sum / time.Duration(n)
 			sm.grad.observe(avgRTT)
 			minRTT := sm.grad.baseline()
 
-			gradient, suggested := suggestedHotSetSize(sm.k, avgRTT, minRTT)
+			gradient, suggested := suggestedHotSetSize(k, avgRTT, minRTT)
+			delta := sm.autoDecide(gradient, k)
 			sm.deps.log().Debugf(
-				"[GRADIENT] K=%d avgRTT=%s minRTT=%s gradient=%.3f suggestedK=%d (dry-run, не применяется)",
-				sm.k, avgRTT, minRTT, gradient, suggested,
+				"[GRADIENT] K=%d avgRTT=%s minRTT=%s gradient=%.3f suggestedK=%d delta=%+d",
+				k, avgRTT, minRTT, gradient, suggested, delta,
 			)
 			if sm.deps.log().DebugEnabled() {
-				appendGradientLog(time.Now(), sm.k, avgRTT, minRTT, gradient, suggested)
+				tx, rx := sm.trafficTotals()
+				appendGradientLog(time.Now(), k, avgRTT, minRTT, gradient, suggested, delta, tx, rx)
 			}
 		}
 	}
+}
+
+// autoDecide прокручивает решающий слой (Шаг 4) ровно на один тик
+// gradientLoop и, если решение непустое и автоскейлер включён, просит
+// refreshLoop применить его. Возвращает решение как есть - в лог и в CSV оно
+// идёт независимо от того, применяется ли: при выключенном автоскейлере это и
+// есть dry-run-запись, по которой видно, что слой сделал бы.
+func (sm *sessionManager) autoDecide(gradient float64, k int) int {
+	b := autoscaleBoundsFor(sm.baseK)
+	delta, refused := sm.auto.decide(gradient, k, b)
+	if refused != 0 {
+		// Серия подтверждений собралась целиком и кулдаун истёк, но зажим по
+		// [min..max] оставил K тем же. Уровень Debug, а не Info: у того, кто
+		// крутится на своём N (потолок == -n), здоровый канал даёт этот отказ
+		// регулярно, в Info он забил бы лог. Зато без строки вообще отказ
+		// выглядит ровно как "сигнала не было" - см. комментарий к decide.
+		action, name, bound := "рост", "потолок", b.max
+		if refused < 0 {
+			action, name, bound = "сжатие", "пол", b.min
+		}
+		sm.deps.log().Debugf("[HOTSET-AUTO] %s K=%d -> %d отказан: %s=%d (gradient=%.3f)",
+			action, k, k+refused, name, bound, gradient)
+	}
+	if delta == 0 {
+		return 0
+	}
+	if !sm.autoEnabled.Load() {
+		sm.deps.log().Infof("[HOTSET-AUTO] выключен: сейчас изменил бы K=%d -> %d (gradient=%.3f)",
+			k, k+delta, gradient)
+		return delta
+	}
+	select {
+	case sm.autoCh <- delta:
+		sm.deps.log().Infof("[HOTSET-AUTO] решение K=%d -> %d (gradient=%.3f)", k, k+delta, gradient)
+	default:
+		// refreshLoop ещё не разобрал предыдущее решение (буфер 1). Кулдаун
+		// уже сброшен, серия обнулена - следующая попытка будет не раньше,
+		// чем через новую полную серию подтверждений. Так и надо: если
+		// refreshLoop занят дольше 30с, добавлять ему очередь решений незачем.
+		sm.deps.log().Infof("[HOTSET-AUTO] решение K=%d -> %d отброшено: refreshLoop занят", k, k+delta)
+	}
+	return delta
+}
+
+// trafficTotals - накопленные с старта процесса байты туннеля из ОБЩЕГО
+// счётчика (Params.TrafficStats, тот же, что кормит [STATS]-строку), а не
+// сумма по слотам hot-set'а: у per-slot счётчиков байты уходящего слота
+// исчезают вместе с ним, то есть сумма врала бы ровно в момент ресайза - тот
+// самый, который мы и хотим измерить. nil - нули: счётчик по контракту
+// Params не обязателен.
+func (sm *sessionManager) trafficTotals() (tx, rx uint64) {
+	if sm.params.TrafficStats == nil {
+		return 0, 0
+	}
+	return sm.params.TrafficStats.Counters()
 }
 
 // gradientLogFile - относительный путь (CWD ядра - на Android это
@@ -307,25 +398,42 @@ const gradientLogFile = "gradient-log.csv"
 // appendGradientLog дописывает один [GRADIENT]-тик в gradientLogFile.
 // Ошибка открытия/записи проглатывается - это диагностика, не должна ронять
 // сессию. Пишет заголовок CSV один раз, если файл пуст/только что создан.
-func appendGradientLog(ts time.Time, k int, avgRTT, minRTT time.Duration, gradient float64, suggested int) {
+//
+// delta - решение слоя Шага 4 на этом тике (-1/0/+1). Оно пишется всегда,
+// включая выключенный автоскейлер: тогда столбец delta показывает, что слой
+// сделал бы, а столбец k - что K не двинулся.
+//
+// txBytes/rxBytes - АБСОЛЮТНЫЕ счётчики туннеля с старта процесса, не
+// приращение за тик. Абсолютные сознательно: скорость на любом отрезке
+// считается как разность двух ЛЮБЫХ строк, делённая на разность их timestamp,
+// в том числе через пропуски (тик без измеренного RTT строки не пишет вовсе).
+// Падение значения между соседними строками - не потеря байт, а рестарт ядра;
+// заодно это бесплатный детектор рестарта в дополнение к сетке секунд в
+// timestamp.
+//
+// Столбцов росло по мере шагов: 6 до Шага 4, 7 с delta, 9 с байтами. Разбор по
+// $2/$5 работает на всех трёх, по $7 - начиная с Шага 4.
+func appendGradientLog(ts time.Time, k int, avgRTT, minRTT time.Duration, gradient float64, suggested, delta int, txBytes, rxBytes uint64) {
 	f, err := os.OpenFile(gradientLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	if info, statErr := f.Stat(); statErr == nil && info.Size() == 0 {
-		fmt.Fprintln(f, "timestamp,k,avg_rtt_ms,min_rtt_ms,gradient,suggested_k")
+		fmt.Fprintln(f, "timestamp,k,avg_rtt_ms,min_rtt_ms,gradient,suggested_k,delta,tx_bytes,rx_bytes")
 	}
-	fmt.Fprintf(f, "%s,%d,%.3f,%.3f,%.3f,%d\n",
-		ts.Format(time.RFC3339), k, avgRTT.Seconds()*1000, minRTT.Seconds()*1000, gradient, suggested)
+	fmt.Fprintf(f, "%s,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d\n",
+		ts.Format(time.RFC3339), k, avgRTT.Seconds()*1000, minRTT.Seconds()*1000, gradient, suggested, delta, txBytes, rxBytes)
 }
 
 // refreshLoop periodically calls refreshOne while ctx is alive. Runs on the
 // same goroutine as run() (called at the end of it, see Task 7) rather than
 // its own - nextID and cancels are only ever touched from here or from
 // launchSlot, which this goroutine also calls, so neither field needs its
-// own lock (see the sessionManager doc comment).
-func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, growCh, shrinkCh <-chan struct{}) {
+// own lock (see the sessionManager doc comment). По той же причине сюда, а не
+// в gradientLoop, приходят решения автоскейлера (sm.autoCh, Шаг 4) - ресайз
+// обязан идти из этой горутины.
+func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, growCh, shrinkCh, autoToggleCh <-chan struct{}) {
 	ticker := time.NewTicker(hotSetRefreshInterval)
 	defer ticker.Stop()
 	lastRefresh := time.Now()
@@ -343,6 +451,21 @@ func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, g
 			sm.growHotSet(ctx, wg)
 		case <-shrinkCh:
 			sm.shrinkHotSet()
+		case delta := <-sm.autoCh:
+			if delta > 0 {
+				sm.growHotSet(ctx, wg)
+			} else {
+				sm.shrinkHotSet()
+			}
+		case <-autoToggleCh:
+			on := !sm.autoEnabled.Load()
+			sm.autoEnabled.Store(on)
+			if on {
+				b := autoscaleBoundsFor(sm.baseK)
+				sm.deps.log().Infof("[HOTSET-AUTO] включён, K в диапазоне [%d..%d]", b.min, b.max)
+			} else {
+				sm.deps.log().Infof("[HOTSET-AUTO] выключен, K остаётся %d (решения только в лог)", sm.k)
+			}
 		}
 	}
 }

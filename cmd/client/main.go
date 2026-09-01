@@ -206,7 +206,8 @@ func main() {
 	rotateCh := make(chan struct{}, 1)
 	growCh := make(chan struct{}, 1)
 	shrinkCh := make(chan struct{}, 1)
-	go readManualCommands(ctx, logger, rotateCh, growCh, shrinkCh)
+	autoToggleCh := make(chan struct{}, 1)
+	go readManualCommands(ctx, logger, rotateCh, growCh, shrinkCh, autoToggleCh)
 
 	udpDtlsDialer := &dtlsdial.Dialer{
 		HandshakeTimeout: 20 * time.Second,
@@ -225,6 +226,7 @@ func main() {
 		RotateCh:     rotateCh,
 		GrowCh:       growCh,
 		ShrinkCh:     shrinkCh,
+		AutoToggleCh: autoToggleCh,
 	}
 	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, cfg.TURN.N); err != nil {
 		if errors.Is(err, udprelay.ErrFatal) {
@@ -420,10 +422,11 @@ func logTrafficStats(ctx context.Context, logger logx.Logger, s *stats.Stats) {
 // docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md,
 // "Failover"). "rotate" - ручное переключение активного слота hot-set'а;
 // "grow"/"shrink" - ручной ±1 к размеру hot-set'а (Шаг 3, живой ресайз -
-// см. sessionManager.growHotSet/shrinkHotSet). Всё это в -transport udp,
-// пока только для ручного теста - gradientLoop's предложение сюда ещё не
-// подключено.
-func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growCh, shrinkCh chan<- struct{}) {
+// см. sessionManager.growHotSet/shrinkHotSet); "auto" - тумблер
+// автоскейлера K (Шаг 4, см. internal/proxy/udprelay/autoscale.go и
+// docs/hotset-autoscaler.md), который включён по умолчанию, то есть первая
+// команда "auto" его ВЫКЛЮЧАЕТ. Всё это только в -transport udp.
+func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growCh, shrinkCh, autoCh chan<- struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -448,6 +451,12 @@ func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growC
 			default:
 			}
 			logger.Infof("[shrink] manual hot-set shrink requested")
+		case "auto":
+			select {
+			case autoCh <- struct{}{}:
+			default:
+			}
+			logger.Infof("[auto] hot-set autoscaler toggle requested")
 		}
 	}
 }
