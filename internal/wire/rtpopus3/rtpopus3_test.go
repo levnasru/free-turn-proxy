@@ -35,8 +35,8 @@ func TestWrapInPlaceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != overhead+len(payload) {
-		t.Fatalf("wire len = %d, want %d", n, overhead+len(payload))
+	if want := MaxWire(len(payload)); n != want {
+		t.Fatalf("wire len = %d, want %d (padded to padTarget)", n, want)
 	}
 	plain, err := srv.UnwrapInPlace(buf[:n])
 	if err != nil {
@@ -240,6 +240,52 @@ func TestTamperDetected(t *testing.T) {
 	buf[n-1] ^= 0xFF
 	if _, err := srv.UnwrapInPlace(buf[:n]); err == nil {
 		t.Fatal("expected AEAD open failure on tampered tag")
+	}
+}
+
+func TestPaddingToTarget(t *testing.T) {
+	t.Parallel()
+	key := newKey(t)
+	cli, _ := NewConn(key, false)
+	srv, _ := NewConn(key, true)
+
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"tiny-below-target", 1},
+		{"just-below-target", padTarget - 1},
+		{"at-target", padTarget},
+		{"above-target", padTarget + 500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			payload := bytes.Repeat([]byte{0xAB}, tc.size)
+			buf := make([]byte, MaxWire(len(payload)))
+			copy(buf[headerLen:], payload)
+			n, err := cli.WrapInPlace(buf, len(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			wantWireLen := overhead + max(tc.size, padTarget) + markerLen
+			if n != wantWireLen {
+				t.Errorf("wire len = %d, want %d", n, wantWireLen)
+			}
+			if tc.size < padTarget && n != MaxWire(1) {
+				t.Errorf("small payload wire len = %d, want padded-to-target %d", n, MaxWire(1))
+			}
+
+			plain, err := srv.UnwrapInPlace(buf[:n])
+			if err != nil {
+				t.Fatalf("unwrap: %v", err)
+			}
+			if !bytes.Equal(plain, payload) {
+				t.Fatalf("plaintext mismatch: got %d bytes, want %d", len(plain), len(payload))
+			}
+		})
 	}
 }
 

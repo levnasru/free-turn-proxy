@@ -3,11 +3,13 @@
 // Package rtpopus3 - wire-профиль обфускации с улучшенной RTP-мимикрией:
 // четыре one-byte extension (audio-level, transport-wide-cc, abs-send-time,
 // sdes:mid), вариативный шаг timestamp, эмуляция потери пакетов (gaps в
-// seq), VAD-модель с переключением silence/speech.
+// seq), VAD-модель с переключением silence/speech, padding payload под
+// размер реального RED-аудио (RFC 2198 и dred живут внутри SRTP-payload,
+// снаружи виден только итоговый размер - см. WrapInPlace).
 //
-// Wire-формат (HeaderLen=44, Overhead=60):
+// Wire-формат (HeaderLen=44, Overhead=60, MaxWire(n)=Overhead+max(n,padTarget)+2):
 //
-//	[12B RTP hdr | 20B one-byte ext | 12B explicit nonce | AEAD ciphertext | 16B tag]
+//	[12B RTP hdr | 20B one-byte ext | 12B explicit nonce | AEAD(payload‖padding‖2B len-marker) | 16B tag]
 //
 // RTP header (RFC 3550):
 //
@@ -66,6 +68,21 @@ const (
 	extMidHdr         = 0x40 // id=4, len=1 (sdes:mid, RFC 8285)
 	midValue          = '0'  // mid-тег; реальный VK BUNDLE использует "0" для первого m-line
 
+	// markerLen - trailing 2-байтный маркер реальной длины payload внутри
+	// зашифрованного блока (см. WrapInPlace). RED/dred в реальном WebRTC
+	// живут ВНУТРИ SRTP-payload - снаружи не видна их структура, только
+	// итоговый размер пакета. Раз наш AEAD тоже шифрует payload одним
+	// блоком, воспроизводить RFC 2198 framing бессмысленно: наблюдателю
+	// снаружи оно всё равно недоступно. Вместо этого - padTarget ниже.
+	markerLen = 2
+	// padTarget - ponytail: калибровочная ручка, не измерено живым тестом
+	// против классификатора VK. Из живого капчура реального звонка
+	// (docs/bandwidth-ceiling-investigation-2026-09-01.md §9.3): аудио с
+	// RED даёт ~167Б/пакет на проводе; за вычетом настоящего RTP+SRTP
+	// overhead (~32-36Б) - Opus+RED payload ≈130Б. Апгрейд: перекалибровать
+	// после живого A/B на тестовом портал-акке, как делали для -obf-timing.
+	padTarget = 130
+
 	speechMinPkts  = 30
 	speechMaxPkts  = 200
 	silenceMinPkts = 5
@@ -81,7 +98,7 @@ const (
 	tsStep40ms = 1920
 )
 
-func MaxWire(payloadLen int) int { return overhead + payloadLen }
+func MaxWire(payloadLen int) int { return overhead + max(payloadLen, padTarget) + markerLen }
 
 type audioState int
 
@@ -173,7 +190,7 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 
 func (*Conn) HeaderLen() int    { return headerLen }
 func (*Conn) Overhead() int     { return overhead }
-func (*Conn) MaxWire(n int) int { return overhead + n }
+func (*Conn) MaxWire(n int) int { return overhead + max(n, padTarget) + markerLen }
 
 func randRange(n int) int {
 	if n <= 0 {
@@ -245,17 +262,22 @@ func (c *Conn) absSendTime() uint32 {
 }
 
 func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
-	if len(dst) < overhead+len(payload) {
+	if len(dst) < c.MaxWire(len(payload)) {
 		return 0, errors.New("rtpopus3:dst buffer too small")
 	}
 	copy(dst[headerLen:], payload)
 	return c.WrapInPlace(dst, len(payload))
 }
 
-// WrapInPlace кодирует plaintext из buf[HeaderLen:HeaderLen+plainLen] на месте.
-// Send-поля берутся под mu; запись в buf и Seal - без блокировки.
+// WrapInPlace кодирует plaintext из buf[HeaderLen:HeaderLen+plainLen] на месте,
+// дополняя его до padTarget байт и trailing markerLen-байтным маркером реальной
+// длины (см. константы) - плоский эквивалент RED/dred по размеру пакета без
+// воспроизведения RFC 2198 framing, которое AEAD всё равно скрывает от внешнего
+// наблюдателя. Send-поля берутся под mu; запись в buf и Seal - без блокировки.
 func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
-	wireLen := overhead + plainLen
+	effLen := max(plainLen, padTarget)
+	sealedLen := effLen + markerLen
+	wireLen := overhead + sealedLen
 	if len(buf) < wireLen {
 		return 0, errors.New("rtpopus3:dst buffer too small")
 	}
@@ -299,9 +321,17 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	copy(buf[32:36], c.sessionID[:])
 	binary.BigEndian.PutUint64(buf[36:headerLen], ctr)
 
+	// Payload из buf[headerLen:headerLen+plainLen] уже на месте (контракт
+	// caller'а); дописываем padding до effLen и маркер реальной длины сразу
+	// за ним - оба внутри AEAD-блока, снаружи неотличимы от Opus-данных.
+	for i := plainLen; i < effLen; i++ {
+		buf[headerLen+i] = 0
+	}
+	binary.BigEndian.PutUint16(buf[headerLen+effLen:headerLen+sealedLen], uint16(plainLen)) //nolint:gosec // plainLen <= maxPayload(1600) << 65536
+
 	nonce := buf[32:headerLen]
 	aad := buf[:headerLen]
-	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+plainLen], aad)
+	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+sealedLen], aad)
 	return wireLen, nil
 }
 
@@ -317,20 +347,25 @@ func (c *Conn) Unwrap(wire, dst []byte) (int, error) {
 	return len(plain), nil
 }
 
-// UnwrapInPlace декодирует wire на месте, возвращая subslice plaintext внутри него.
+// UnwrapInPlace декодирует wire на месте и снимает padding/маркер (см.
+// WrapInPlace), возвращая subslice РЕАЛЬНОГО plaintext внутри wire.
 func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
-	if len(wire) < overhead {
+	if len(wire) < overhead+padTarget+markerLen {
 		return nil, errors.New("rtpopus3:packet too short")
 	}
 	nonce := wire[32:headerLen]
 	aad := wire[:headerLen]
 	ct := wire[headerLen:]
 
-	plain, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
+	sealed, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
 	if err != nil {
 		return nil, fmt.Errorf("rtpopus3:AEAD open: %w", err)
 	}
-	return plain, nil
+	realLen := int(binary.BigEndian.Uint16(sealed[len(sealed)-markerLen:]))
+	if realLen > len(sealed)-markerLen {
+		return nil, errors.New("rtpopus3:length marker exceeds sealed payload")
+	}
+	return sealed[:realLen], nil
 }
 
 func GenKeyHex() (string, error) {

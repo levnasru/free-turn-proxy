@@ -13,7 +13,7 @@ import (
 
 var bufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 1600+overhead)
+		b := make([]byte, 1600+overhead+markerLen)
 		return &b
 	},
 }
@@ -84,7 +84,10 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 func (c *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	wireLen := overhead + len(p)
+	// MaxWire, не overhead+len(p): WrapInPlace дополняет payload до padTarget
+	// байт + 2B маркер (см. rtpopus3.go), сырая формула была бы мала для
+	// коротких пакетов.
+	wireLen := c.conn.MaxWire(len(p))
 
 	bp := bufPool.Get().(*[]byte) //nolint:errcheck // pool New always returns *[]byte
 	out := *bp
