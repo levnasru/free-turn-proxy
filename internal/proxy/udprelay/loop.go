@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cbeuw/connutil"
 	"github.com/samosvalishe/free-turn-proxy/internal/clientsdb"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/codel"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
@@ -52,20 +52,14 @@ func DTLSLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr
 }
 
 // TURNLoop ведёт половину TURN-аллокации. Ждёт свежий conn2 от DTLS-цикла,
-// тормозит через t (глобальный тик 200ms), выполняет одну TURN-сессию
-// и реагирует на provider.ErrFatalNoStreams / provider.ErrBackoffActive
-// соответственно.
+// выполняет одну TURN-сессию и реагирует на provider.ErrFatalNoStreams /
+// provider.ErrBackoffActive соответственно.
 func TURNLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, connchan <-chan net.PacketConn, t <-chan time.Time, streamID int, health *slotHealth) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case conn2 := <-connchan:
-			select {
-			case <-t:
-			case <-ctx.Done():
-				return
-			}
 			c := make(chan error, 1)
 			go oneTURN(ctx, deps, params, peer, conn2, streamID, c, health)
 
@@ -124,7 +118,10 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
 	defer dtlscancel()
 
-	conn1, conn2 := connutil.AsyncPacketPipe()
+	// codel.NewPipe заменяет безлимитный connutil.AsyncPacketPipe: ограничивает
+	// буферблоат через RFC 8289 CoDel (Target=30ms, Interval=100ms, hardCap=30),
+	// предотвращая шторм ретрансмитов TCP при всплесках трафика.
+	conn1, conn2 := codel.NewPipe(0, 0)
 	defer func() { _ = conn1.Close() }()
 	defer func() { _ = conn2.Close() }()
 	// TURNLoop может перезапускать oneTURN несколько раз в рамках одного DTLS
@@ -138,6 +135,7 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			}
 		}
 	}()
+	deps.log().Debugf("[STREAM %d] Starting DTLS handshake to %s", streamID, peer)
 	dtlsRaw, err1 := deps.DTLSDialer.Dial(dtlsctx, conn1, peer)
 	if err1 != nil {
 		return fmt.Errorf("failed to connect DTLS: %w", err1)
@@ -354,13 +352,15 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			}
 
 			written, err1 := relayConn.WriteTo(out, peer)
+			if err1 != nil {
+				deps.log().Errorf("[STREAM %d] relay write error: %v", streamID, err1)
+				return
+			}
+			deps.log().Debugf("[STREAM %d] sent %d bytes to peer via relay", streamID, written)
 			if params.TrafficStats != nil {
 				params.TrafficStats.AddTx(written)
 			}
 			health.stats.AddTx(written)
-			if err1 != nil {
-				return
-			}
 		}
 	})
 
@@ -376,8 +376,10 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			if err1 != nil {
 				return
 			}
+			deps.log().Debugf("[STREAM %d] received %d bytes from relay", streamID, n)
 			addr1 := internalPipeAddr.Load()
 			if addr1 == nil {
+				deps.log().Debugf("[STREAM %d] dropping packet: internalPipeAddr not set yet", streamID)
 				continue
 			}
 

@@ -47,6 +47,20 @@ func (l *packetListener) Accept() (net.PacketConn, net.Addr, error) {
 	if err != nil {
 		return nil, addr, err
 	}
+	// ponytail: heisenbug mitigation, not a root-cause fix - exact race is
+	// somewhere between pion/dtls's first read on a freshly Accept()'d conn
+	// and this conn's registration in pionudp.Listen (traced through
+	// pionudp.Listen + pion/dtls conn.go/listener.go/netctx, no smoking gun
+	// found; disappears under any added scheduling delay - println, -race
+	// build - which is why a delay fixes it without knowing why). Reproduces
+	// 100% on very-low-jitter loopback-through-relay paths (self-hosted
+	// client+server both dialing out through the same TURN relay); never
+	// observed on real family traffic, which has enough natural network
+	// jitter to miss the window on its own. Accept() runs once per
+	// connection, not per packet, so this costs nothing on the hot relay
+	// path. Upgrade path: file upstream against pion/dtls with a repro, or
+	// bisect pion/dtls's conn.go readAndBuffer/handshake goroutines directly.
+	time.Sleep(3 * time.Millisecond)
 	return &packetConn{inner: pc, conn: conn}, addr, nil
 }
 
