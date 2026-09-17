@@ -139,6 +139,7 @@ type Conn struct {
 
 	mu        sync.Mutex
 	isLegacy  bool
+	isVideo   bool
 	counter   uint64
 	seq       uint16
 	timestamp uint32
@@ -217,11 +218,21 @@ func (c *Conn) Overhead() int {
 func (c *Conn) MaxWire(n int) int {
 	c.mu.Lock()
 	legacy := c.isLegacy
+	isVideo := c.isVideo
 	c.mu.Unlock()
+	if isVideo {
+		return overhead + n + markerLen
+	}
 	if legacy {
 		return legacyOverhead + n
 	}
 	return overhead + max(n, padTarget) + markerLen
+}
+
+func (c *Conn) IsVideo() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.isVideo
 }
 
 func (c *Conn) IsLegacy() bool {
@@ -321,6 +332,7 @@ func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
 // Send-поля берутся под mu; запись в buf и Seal - без блокировки.
 func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	c.mu.Lock()
+	isVideo := c.isVideo
 	legacy := c.isLegacy
 	marker := c.updateAudioState()
 	level := c.audioLevel()
@@ -332,6 +344,43 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	ctr := c.counter
 	c.counter++
 	c.mu.Unlock()
+
+	if isVideo {
+		wireLen := overhead + plainLen + markerLen
+		if len(buf) < wireLen {
+			return 0, errors.New("rtpopus3:dst buffer too small")
+		}
+		buf[0] = rtpVerExt
+		buf[1] = 0x60 // PT=96 (VP8)
+		binary.BigEndian.PutUint16(buf[2:4], seq)
+		binary.BigEndian.PutUint32(buf[4:8], ts)
+		copy(buf[8:12], c.ssrc[:])
+
+		buf[12] = 0xBE
+		buf[13] = 0xDE
+		binary.BigEndian.PutUint16(buf[14:16], 3)
+		buf[16] = extTransportHdr
+		binary.BigEndian.PutUint16(buf[17:19], tcc)
+		buf[19] = extAbsSendTimeHdr
+		ast := c.absSendTime()
+		buf[20], buf[21], buf[22] = byte(ast>>16), byte(ast>>8), byte(ast)
+		buf[23] = extMidHdr
+		buf[24] = '1' // video mid
+		buf[25], buf[26], buf[27] = 0, 0, 0
+
+		buf[28] = 0x10 // VP8 keyframe descriptor
+		buf[29], buf[30], buf[31] = 0, 0, 0
+
+		copy(buf[32:36], c.sessionID[:])
+		binary.BigEndian.PutUint64(buf[36:headerLen], ctr)
+
+		binary.BigEndian.PutUint16(buf[headerLen+plainLen:headerLen+plainLen+markerLen], uint16(plainLen))
+
+		nonce := buf[32:headerLen]
+		aad := buf[:headerLen]
+		c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+plainLen+markerLen], aad)
+		return wireLen, nil
+	}
 
 	if legacy {
 		wireLen := legacyOverhead + plainLen
@@ -437,6 +486,30 @@ func (c *Conn) Unwrap(wire, dst []byte) (int, error) {
 func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	if len(wire) < legacyOverhead {
 		return nil, errors.New("rtpopus3:packet too short")
+	}
+
+	// Автодетекция VP8 Video пакета (PT=96, 0x60) от rtpvideo-клиента
+	if wire[1]&0x7F == 0x60 {
+		if len(wire) < overhead+markerLen {
+			return nil, errors.New("rtpopus3:packet too short for video")
+		}
+		nonce := wire[32:headerLen]
+		aad := wire[:headerLen]
+		ct := wire[headerLen:]
+
+		sealed, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
+		if err != nil {
+			return nil, fmt.Errorf("rtpopus3:video AEAD open: %w", err)
+		}
+		realLen := int(binary.BigEndian.Uint16(sealed[len(sealed)-markerLen:]))
+		if realLen > len(sealed)-markerLen {
+			return nil, errors.New("rtpopus3:video length marker exceeds payload")
+		}
+		c.mu.Lock()
+		c.isVideo = true
+		c.isLegacy = false
+		c.mu.Unlock()
+		return sealed[:realLen], nil
 	}
 
 	// Проверяем RFC 8285 extension header (offset 12)

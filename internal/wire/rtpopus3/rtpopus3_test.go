@@ -448,3 +448,77 @@ func TestDualModeServer(t *testing.T) {
 		t.Fatal("mod cli plain mismatch")
 	}
 }
+
+func TestRTPVideoToRTPOpus3Server(t *testing.T) {
+	t.Parallel()
+	key := newKey(t)
+
+	srv, err := NewConn(key, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Manually craft a VP8 packet (PT=96, 0x60, RFC 8285 ext, VP8 descriptor 0x10)
+	payload := []byte("vp8-frame-payload-data")
+	plainLen := len(payload)
+	wireLen := overhead + plainLen + markerLen
+	buf := make([]byte, wireLen)
+
+	buf[0] = rtpVerExt
+	buf[1] = 0x60 // PT=96 (VP8 video)
+	binary.BigEndian.PutUint16(buf[2:4], 100)
+	binary.BigEndian.PutUint32(buf[4:8], 90000)
+	copy(buf[8:12], []byte{1, 2, 3, 4}) // SSRC
+
+	buf[12] = 0xBE
+	buf[13] = 0xDE
+	binary.BigEndian.PutUint16(buf[14:16], 3)
+	buf[16] = extTransportHdr
+	binary.BigEndian.PutUint16(buf[17:19], 1)
+	buf[19] = extAbsSendTimeHdr
+	buf[20], buf[21], buf[22] = 0, 0, 1
+	buf[23] = extMidHdr
+	buf[24] = '1'
+	buf[25], buf[26], buf[27] = 0, 0, 0
+
+	buf[28] = 0x10 // VP8 descriptor
+	buf[29], buf[30], buf[31] = 0, 0, 0
+
+	var sessionID [4]byte
+	sessionID[0] = 0x01 // client session ID (MSB=0)
+	copy(buf[32:36], sessionID[:])
+	binary.BigEndian.PutUint64(buf[36:headerLen], 0)
+
+	copy(buf[headerLen:headerLen+plainLen], payload)
+	binary.BigEndian.PutUint16(buf[headerLen+plainLen:headerLen+plainLen+markerLen], uint16(plainLen))
+
+	nonce := buf[32:headerLen]
+	aad := buf[:headerLen]
+	srv.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+plainLen+markerLen], aad)
+
+	// 2. Server unwraps the VP8 packet
+	received, err := srv.UnwrapInPlace(buf)
+	if err != nil {
+		t.Fatalf("srv unwrap video: %v", err)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Fatalf("srv received payload mismatch: %s != %s", received, payload)
+	}
+	if !srv.IsVideo() {
+		t.Fatal("srv must be marked as IsVideo() after receiving PT=96")
+	}
+
+	// 3. Server replies - must use PT=96 (VP8 video)
+	reply := []byte("server-reply-for-video-stream")
+	replyBuf := make([]byte, srv.MaxWire(len(reply)))
+	copy(replyBuf[srv.HeaderLen():], reply)
+	rn, err := srv.WrapInPlace(replyBuf, len(reply))
+	if err != nil {
+		t.Fatalf("srv wrap reply: %v", err)
+	}
+	replyWire := replyBuf[:rn]
+	if replyWire[1]&0x7F != 0x60 {
+		t.Fatalf("server reply PT: got 0x%x, want 0x60 (VP8 video)", replyWire[1]&0x7F)
+	}
+}
+

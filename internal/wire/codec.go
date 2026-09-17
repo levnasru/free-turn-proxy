@@ -14,6 +14,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus2"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus3"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpvideo"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
@@ -23,6 +24,7 @@ const (
 	ProfileRTPOpus  = "rtpopus"
 	ProfileRTPOpus2 = "rtpopus2"
 	ProfileRTPOpus3 = "rtpopus3"
+	ProfileRTPVideo = "rtpvideo"
 )
 
 // Codec - клиентский кодек wire-профиля: AEAD-обёртка payload с мимикрией.
@@ -51,6 +53,8 @@ func NewClientCodec(profile string, key []byte) (Codec, error) {
 		return rtpopus2.NewConn(key, false)
 	case ProfileRTPOpus3:
 		return rtpopus3.NewConn(key, false)
+	case ProfileRTPVideo:
+		return rtpvideo.NewConn(key, false)
 	default:
 		return nil, fmt.Errorf("wire: unknown obf profile %q", profile)
 	}
@@ -74,6 +78,8 @@ func Listen(profile string, addr *net.UDPAddr, key []byte, serverTiming ...time.
 		listener, err = rtpopus2.Listen(addr, key)
 	case ProfileRTPOpus3:
 		listener, err = rtpopus3.Listen(addr, key)
+	case ProfileRTPVideo:
+		listener, err = rtpvideo.Listen(addr, key)
 	default:
 		return nil, fmt.Errorf("wire: profile %q has no server listener", profile)
 	}
