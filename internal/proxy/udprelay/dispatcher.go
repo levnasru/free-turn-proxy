@@ -30,20 +30,18 @@ type slotHandle struct {
 	launchedAt time.Time
 }
 
-// slotInboundBufferSize - маленький буфер на слот. Живой слот (oneDTLS
-// вычитывает inboundChan почти со скоростью сети) держит его почти всегда
-// пустым; мёртвый (между reconnect-попытками DTLSLoop, до 10-30s backoff)
-// заполняет его за пару пакетов и route() просто роняет пакет через
-// default - см. route().
-const slotInboundBufferSize = 4
+// slotInboundBufferSize - буфер на слот (16 пакетов). Предоставляет запас
+// для микробатчинга, исключая дропы пакетов при обработке пачки DTLS-воркером.
+const (
+	slotInboundBufferSize = 16
+	defaultBatchSize      = 4 // число последовательных пакетов в один слот перед ротацией (микробатчинг)
+)
 
 // dispatcher - единственный читатель общего inboundChan (см. run.go).
-// Маршрутизирует пакеты round-robin'ом по всем живым членам hot-set'а (см.
+// Маршрутизирует пакеты микробатчингом round-robin по всем живым членам hot-set'а (см.
 // route()). active/rotateManual остаются только как учёт "какой слот
 // сейчас защищён от retire в replaceSlot" для sessionManager.refreshOne -
-// на фактическую маршрутизацию пакетов больше не влияют (см. route()'s
-// doc comment - разгрузка на единственный активный слот и её
-// liveness-failover убраны 2026-08-24 по прямой просьбе). Не открывает и
+// на фактическую маршрутизацию пакетов больше не влияют. Не открывает и
 // не закрывает сами TURN/DTLS-сессии - этим занимается sessionManager;
 // dispatcher только маршрутизирует пакеты уже поднятых слотов.
 type dispatcher struct {
@@ -52,10 +50,19 @@ type dispatcher struct {
 	active int
 
 	roundRobin int // индекс для route()'s round-robin по всем слотам
+	burstCount int // число пакетов, уже отправленных в текущий слот в рамках батча
+	batchSize  int // размер батча (по умолчанию defaultBatchSize)
 }
 
 func newDispatcher() *dispatcher {
-	return &dispatcher{}
+	return newDispatcherWithBatch(defaultBatchSize)
+}
+
+func newDispatcherWithBatch(batchSize int) *dispatcher {
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	return &dispatcher{batchSize: batchSize}
 }
 
 // setSlots (пере)задаёт состав hot-set'а. keepActiveStreamID - какой слот
@@ -67,6 +74,12 @@ func (d *dispatcher) setSlots(slots []*slotHandle, keepActiveStreamID int) {
 	defer d.mu.Unlock()
 	d.slots = slots
 	d.active = 0
+	d.burstCount = 0
+	if len(slots) > 0 {
+		d.roundRobin = d.roundRobin % len(slots)
+	} else {
+		d.roundRobin = 0
+	}
 	for i, s := range slots {
 		if s.streamID == keepActiveStreamID {
 			d.active = i
@@ -135,6 +148,12 @@ func (d *dispatcher) removeSlot(streamID int) bool {
 			if d.active > i {
 				d.active--
 			}
+			if len(newSlots) > 0 {
+				d.roundRobin = d.roundRobin % len(newSlots)
+			} else {
+				d.roundRobin = 0
+			}
+			d.burstCount = 0
 			return true
 		}
 	}
@@ -178,15 +197,13 @@ func (d *dispatcher) rotateManual() {
 	d.active = (d.active + 1) % len(d.slots)
 }
 
-// route отдаёт один пакет очередному слоту round-robin'ом по ВСЕМ живым
-// членам hot-set'а. Разгрузка на единственный "активный" слот убрана по
-// прямой просьбе 2026-08-24 - она душила пропускную способность до
-// потолка одного relay-пути (единственный путь = единственная пропускная
-// способность, а не разнообразие, ради которого city заводился hot-set
-// изначально). Round-robin возвращает параллелизм ценой части
-// endpoint-стабильности на сервере, которую чинила session-affinity
-// (docs/superpowers/specs/2026-08-23-udp-relay-session-affinity-design.md) -
-// осознанный откат, не забытая недоделка.
+// route отдаёт пакет очередному слоту микробатчингом (batchSize пакетов
+// подряд в один слот) по кругу среди живых членов hot-set'а.
+// Микробатчинг предотвращает разрывы порядка (out-of-order) в TCP-потоках
+// внутри коротких всплесков, из-за которых TCP режет cwnd и генерирует
+// тысячи DUPACK. Если текущий целевой слот полон (перегружен или отвалился),
+// диспетчер перенаправляет пакет следующему свободному слоту и переносит
+// батч на него.
 func (d *dispatcher) route(pkt *Packet) {
 	d.mu.Lock()
 	n := len(d.slots)
@@ -195,15 +212,34 @@ func (d *dispatcher) route(pkt *Packet) {
 		packetPool.Put(pkt)
 		return
 	}
-	startIdx := d.roundRobin
-	d.roundRobin++
+	startIdx := d.roundRobin % n
 	slots := d.slots
+	bs := d.batchSize
+	if bs <= 0 {
+		bs = defaultBatchSize
+	}
 	d.mu.Unlock()
 
 	for i := 0; i < n; i++ {
-		target := slots[(startIdx+i)%n]
+		idx := (startIdx + i) % n
+		target := slots[idx]
 		select {
 		case target.inbound <- pkt:
+			d.mu.Lock()
+			if len(d.slots) > 0 {
+				if idx != d.roundRobin%len(d.slots) {
+					// Слот по умолчанию был занят; переносим указатель на принявший слот и начинаем новый батч
+					d.roundRobin = idx % len(d.slots)
+					d.burstCount = 1
+				} else {
+					d.burstCount++
+					if d.burstCount >= bs {
+						d.burstCount = 0
+						d.roundRobin = (d.roundRobin + 1) % len(d.slots)
+					}
+				}
+			}
+			d.mu.Unlock()
 			return
 		default:
 		}

@@ -41,6 +41,7 @@ type Params struct {
 	Profile      string
 	ObfKey       []byte
 	ObfTiming    time.Duration
+	BatchSize    int // размер пачки пакетов в один слот перед ротацией (микробатчинг, default 4)
 	GetCreds     GetCredsFunc
 	ClientID     string
 	TrafficStats *stats.Stats

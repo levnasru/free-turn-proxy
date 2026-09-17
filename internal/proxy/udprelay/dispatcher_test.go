@@ -16,7 +16,7 @@ func newTestSlot(streamID int) *slotHandle {
 
 func TestDispatcherRoutesRoundRobin(t *testing.T) {
 	t.Parallel()
-	d := newDispatcher()
+	d := newDispatcherWithBatch(2)
 	s1, s2, s3 := newTestSlot(1), newTestSlot(2), newTestSlot(3)
 	d.setSlots([]*slotHandle{s1, s2, s3}, 1)
 
@@ -27,6 +27,24 @@ func TestDispatcherRoutesRoundRobin(t *testing.T) {
 	for _, s := range []*slotHandle{s1, s2, s3} {
 		if got := len(s.inbound); got != 2 {
 			t.Fatalf("expected 2 packets on slot %d after 6 round-robin routes, got %d", s.streamID, got)
+		}
+	}
+}
+
+func TestDispatcherRoutesMicroBatch(t *testing.T) {
+	t.Parallel()
+	d := newDispatcherWithBatch(4)
+	s1, s2, s3 := newTestSlot(1), newTestSlot(2), newTestSlot(3)
+	d.setSlots([]*slotHandle{s1, s2, s3}, 1)
+
+	// Send 12 packets (3 batches of 4)
+	for i := 0; i < 12; i++ {
+		d.route(&Packet{Data: []byte("x"), N: 1})
+	}
+
+	for _, s := range []*slotHandle{s1, s2, s3} {
+		if got := len(s.inbound); got != 4 {
+			t.Fatalf("expected 4 packets on slot %d after 12 batched routes, got %d", s.streamID, got)
 		}
 	}
 }
@@ -169,7 +187,7 @@ func TestDispatcherReplaceSlot(t *testing.T) {
 
 func TestDispatcherAddSlot(t *testing.T) {
 	t.Parallel()
-	d := newDispatcher()
+	d := newDispatcherWithBatch(1)
 	s1, s2 := newTestSlot(1), newTestSlot(2)
 	d.setSlots([]*slotHandle{s1, s2}, 1)
 

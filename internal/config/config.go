@@ -46,6 +46,7 @@ type TURNOpts struct {
 	Port         string // -port: переопределить порт TURN
 	TransportUDP bool   // -transport udp: подключение к TURN по UDP (по умолчанию TCP/TLS)
 	N            int    // -n: число TURN-потоков (только клиент)
+	BatchSize    int    // -batch: размер пачки пакетов в один слот перед ротацией (микробатчинг, default 4)
 }
 
 // ObfProfile выбирает wire-профиль обфускации TURN-payload.
@@ -221,6 +222,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	links := fs.String("links", "", "ссылки VK Calls через запятую: https://vk.ru/call/join/...,https://vk.ru/call/join/...")
 	peer := fs.String("peer", "", "адрес сервера на VPS, host:port; обязательно")
 	n := fs.Int("n", 10, "число параллельных TURN-потоков")
+	batch := fs.Int("batch", 4, "размер пачки пакетов в один слот перед ротацией (микробатчинг; default 4, 1=попакетный round-robin)")
 	transport := fs.String("transport", "tcp", "транспорт до TURN-реле: tcp | udp")
 	mode := fs.String("mode", "udp", "режим туннеля: udp (WireGuard) | tcp (Xray/sing-box)")
 	bond := fs.Bool("bond", false, "страйпинг TCP по smux-сессиям; только с -mode tcp")
@@ -253,6 +255,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 			Port:         *port,
 			TransportUDP: *transport == "udp",
 			N:            *n,
+			BatchSize:    *batch,
 		},
 		Obf: ObfOpts{
 			Profile: ObfProfile(*obfProfile),

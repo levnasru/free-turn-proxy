@@ -220,6 +220,7 @@ func main() {
 		Profile:      string(cfg.Obf.Profile),
 		ObfKey:       cfg.Obf.Key,
 		ObfTiming:    cfg.Obf.Timing,
+		BatchSize:    cfg.TURN.BatchSize,
 		GetCreds:     udprelay.GetCredsFunc(getCreds),
 		ClientID:     cfg.ClientID,
 		TrafficStats: trafficStats,

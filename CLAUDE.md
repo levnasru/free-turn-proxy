@@ -67,6 +67,26 @@
   регуляризации скорости недоступен на TCP+bond.
 - **`scripts/install.sh:366-370` не знает `rtpopus3`** и делает `die`. `docs/flags.md`
   при этом актуален — расходится именно скрипт.
+- **Потолок ~250-280 КБ/с на TURN-сессию — architectural, не DPI-классификация
+  трафика [ПРОВЕРЕНО живьём 2026-09-01/03, 6 независимых тестов подряд].**
+  payload-size, DTLS-фингерпринт, video-PT, K=1-бюджет, BUNDLE-мультиплексирование,
+  TWCC-двунаправленность — ни один не сдвинул цифру. Подробности и методика —
+  `docs/bandwidth-ceiling-investigation-2026-09-01.md`. Не пытаться обмануть
+  классификатор реализмом трафика заново без новых данных.
+- **Очередь между DTLS и TURN (`internal/proxy/udprelay/loop.go`) управляется CoDel
+  (`internal/wire/codel`)**: старый `connutil.AsyncPacketPipe()` был безлимитен (`softLimit=0`),
+  что приводило к bufferbloat и RTO шторму. Первая попытка CoDel 03.09 провалилась из-за
+  head-drop при `hardCap=2000` (уничтожение порядка пакетов и 14с задержки). Исправлено
+  по каноническому RFC 8289: строгий tail-drop при `hardCap=30` (верхняя планка RTT ~210мс
+  при 7мс/пакет), `Target=30ms`, `Interval=100ms`, `dodequeue` с backlog-guard (не ронять
+  при опустошении очереди).
+- **DTLS-хендшейк в `-mode udp` — реальная race condition** на аномально
+  быстрых/стабильных каналах (100% воспроизводится на localhost-петле через
+  netns, никогда не видели в проде). Митигейт (не root-cause): `time.Sleep(3ms)`
+  в `rtpopus3.packetListener.Accept()` (`internal/wire/rtpopus3/listen.go`) —
+  один раз на соединение, нулевая цена на горячем пути. Точный механизм не
+  пришпилен после чтения `pion/transport/udp` + `pion/dtls` (listener.go/
+  conn.go) + `netctx` — см. doc §10.2.
 
 ## Чего не делать
 

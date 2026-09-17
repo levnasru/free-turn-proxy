@@ -57,6 +57,10 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 	if k <= 0 {
 		k = 1
 	}
+	batchSize := defaultBatchSize
+	if params != nil && params.BatchSize > 0 {
+		batchSize = params.BatchSize
+	}
 	sm := &sessionManager{
 		deps:       deps,
 		params:     params,
@@ -64,7 +68,7 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 		listenConn: listenConn,
 		k:          k,
 		t:          t,
-		disp:       newDispatcher(),
+		disp:       newDispatcherWithBatch(batchSize),
 		grad:       newGradientTracker(),
 		baseK:      k,
 		auto:       &autoscaleDecider{},

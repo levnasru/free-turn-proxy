@@ -422,6 +422,7 @@ func startWithArgs(args []string, clientType string) error {
 			Profile:      string(cfg.Obf.Profile),
 			ObfKey:       cfg.Obf.Key,
 			ObfTiming:    cfg.Obf.Timing,
+			BatchSize:    cfg.TURN.BatchSize,
 			GetCreds:     udprelay.GetCredsFunc(getCreds),
 			ClientID:     cfg.ClientID,
 			TrafficStats: traffic.stats,
