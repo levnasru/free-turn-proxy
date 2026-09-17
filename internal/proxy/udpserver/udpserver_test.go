@@ -1,0 +1,329 @@
+package udpserver
+
+import (
+	"context"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/samosvalishe/free-turn-proxy/internal/logx"
+)
+
+// mockPacketConn emulates a DTLS datagram connection in memory.
+type mockPacketConn struct {
+	readCh  chan []byte
+	writeCh chan []byte
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newMockPacketConn() (*mockPacketConn, *mockPacketConn) {
+	c1 := make(chan []byte, 32)
+	c2 := make(chan []byte, 32)
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+
+	conn1 := &mockPacketConn{readCh: c1, writeCh: c2, closed: done1}
+	conn2 := &mockPacketConn{readCh: c2, writeCh: c1, closed: done2}
+	return conn1, conn2
+}
+
+func (m *mockPacketConn) Read(b []byte) (int, error) {
+	select {
+	case <-m.closed:
+		return 0, net.ErrClosed
+	case data, ok := <-m.readCh:
+		if !ok {
+			return 0, net.ErrClosed
+		}
+		n := copy(b, data)
+		return n, nil
+	}
+}
+
+func (m *mockPacketConn) Write(b []byte) (int, error) {
+	select {
+	case <-m.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+	pkt := make([]byte, len(b))
+	copy(pkt, b)
+	select {
+	case <-m.closed:
+		return 0, net.ErrClosed
+	case m.writeCh <- pkt:
+		return len(b), nil
+	}
+}
+
+func (m *mockPacketConn) Close() error {
+	m.once.Do(func() {
+		close(m.closed)
+	})
+	return nil
+}
+
+func (m *mockPacketConn) LocalAddr() net.Addr                { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234} }
+func (m *mockPacketConn) RemoteAddr() net.Addr               { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5678} }
+func (m *mockPacketConn) SetDeadline(t time.Time) error      { return nil }
+func (m *mockPacketConn) SetReadDeadline(t time.Time) error  { return nil }
+func (m *mockPacketConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func TestUDPServerRegistryMultiStreamBatching(t *testing.T) {
+	// 1. Start a local UDP backend (mocking WireGuard)
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen backend: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	logger := logx.New(false)
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 4})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 2. Connect 3 simulated streams from the same client sequentially
+	const numStreams = 3
+	type streamPair struct {
+		clientSide *mockPacketConn
+		serverSide *mockPacketConn
+	}
+	streams := make([]streamPair, numStreams)
+	for i := 0; i < numStreams; i++ {
+		cSide, sSide := newMockPacketConn()
+		streams[i] = streamPair{clientSide: cSide, serverSide: sSide}
+
+		go reg.Handle(ctx, logger, sSide, backendAddr, "client-test-123")
+		time.Sleep(20 * time.Millisecond) // ensure deterministic slot ordering
+	}
+
+	// 3. Send 1 packet from each stream to backend; verify backend receives them from the SAME source address!
+	var commonSender net.Addr
+	for i := 0; i < numStreams; i++ {
+		msg := []byte("hello-from-stream")
+		if _, werr := streams[i].clientSide.Write(msg); werr != nil {
+			t.Fatalf("stream %d write: %v", i, werr)
+		}
+
+		buf := make([]byte, 1024)
+		_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, sender, rerr := backend.ReadFrom(buf)
+		if rerr != nil {
+			t.Fatalf("backend read packet %d: %v", i, rerr)
+		}
+		if string(buf[:n]) != string(msg) {
+			t.Fatalf("backend got %q, want %q", string(buf[:n]), string(msg))
+		}
+
+		if commonSender == nil {
+			commonSender = sender
+		} else if commonSender.String() != sender.String() {
+			t.Fatalf("endpoint mismatch! stream %d arrived from %s, expected %s (endpoint roaming inversion not neutralized)",
+				i, sender.String(), commonSender.String())
+		}
+	}
+
+	// 4. Send 12 packets from backend to commonSender; verify micro-batching:
+	for i := 0; i < 12; i++ {
+		pkt := []byte{byte(i)}
+		if _, werr := backend.WriteTo(pkt, commonSender); werr != nil {
+			t.Fatalf("backend send packet %d: %v", i, werr)
+		}
+	}
+
+	// Collect packets received by each stream
+	batches := make([][]byte, numStreams)
+	for sIdx := 0; sIdx < numStreams; sIdx++ {
+		for pIdx := 0; pIdx < 4; pIdx++ {
+			select {
+			case pkt := <-streams[sIdx].clientSide.readCh:
+				batches[sIdx] = append(batches[sIdx], pkt...)
+			case <-time.After(2 * time.Second):
+				t.Fatalf("stream %d timed out waiting for packet %d (got %d packets so far)", sIdx, pIdx, len(batches[sIdx]))
+			}
+		}
+	}
+
+	// Verify each stream received exactly 4 packets
+	for sIdx, b := range batches {
+		if len(b) != 4 {
+			t.Fatalf("stream %d expected 4 packets, got %d", sIdx, len(b))
+		}
+		// Verify consecutive sequence within each batch
+		for k := 1; k < len(b); k++ {
+			if b[k] != b[k-1]+1 {
+				t.Fatalf("stream %d packets out of order within micro-batch: %v", sIdx, b)
+			}
+		}
+	}
+}
+
+func TestUDPServerRegistryMultiClientIsolation(t *testing.T) {
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen backend: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	logger := logx.New(false)
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 4})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Client A
+	cAClient, cAServer := newMockPacketConn()
+	go reg.Handle(ctx, logger, cAServer, backendAddr, "client-A")
+
+	// Client B
+	cBClient, cBServer := newMockPacketConn()
+	go reg.Handle(ctx, logger, cBServer, backendAddr, "client-B")
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send from Client A
+	_, _ = cAClient.Write([]byte("msgA"))
+	buf := make([]byte, 1024)
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, addrA, err := backend.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+
+	// Send from Client B
+	_, _ = cBClient.Write([]byte("msgB"))
+	_, addrB, err := backend.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read B: %v", err)
+	}
+
+	if addrA.String() == addrB.String() {
+		t.Fatalf("clients A and B must have different backend sockets, both got %s", addrA.String())
+	}
+
+	// Send reply to A only
+	_, _ = backend.WriteTo([]byte("replyA"), addrA)
+
+	select {
+	case pkt := <-cAClient.readCh:
+		if string(pkt) != "replyA" {
+			t.Fatalf("client A got %s, want replyA", string(pkt))
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("client A timed out waiting for reply")
+	}
+
+	// Ensure B got nothing
+	select {
+	case pkt := <-cBClient.readCh:
+		t.Fatalf("client B unexpectedly received %s", string(pkt))
+	case <-time.After(100 * time.Millisecond):
+		// OK
+	}
+}
+
+func TestUDPServerRegistryStreamFailover(t *testing.T) {
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen backend: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	logger := logx.New(false)
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 4})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const numStreams = 3
+	type streamPair struct {
+		clientSide *mockPacketConn
+		serverSide *mockPacketConn
+	}
+	streams := make([]streamPair, numStreams)
+	for i := 0; i < numStreams; i++ {
+		cSide, sSide := newMockPacketConn()
+		streams[i] = streamPair{clientSide: cSide, serverSide: sSide}
+
+		go reg.Handle(ctx, logger, sSide, backendAddr, "client-failover")
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Ping backend to acquire sender address
+	_, _ = streams[0].clientSide.Write([]byte("ping"))
+	buf := make([]byte, 1024)
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, commonSender, rerr := backend.ReadFrom(buf)
+	if rerr != nil {
+		t.Fatalf("read from backend: %v", rerr)
+	}
+
+	// Disconnect stream 1
+	_ = streams[1].clientSide.Close()
+	_ = streams[1].serverSide.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	// Send 8 packets (2 batches of 4) -> should be distributed across streams 0 and 2
+	for i := 0; i < 8; i++ {
+		_, _ = backend.WriteTo([]byte{byte(10 + i)}, commonSender)
+	}
+
+	// Streams 0 and 2 should each receive 4 packets
+	for _, idx := range []int{0, 2} {
+		for k := 0; k < 4; k++ {
+			select {
+			case <-streams[idx].clientSide.readCh:
+				// OK
+			case <-time.After(2 * time.Second):
+				t.Fatalf("stream %d timed out waiting for failover packet %d", idx, k)
+			}
+		}
+	}
+}
+
+func TestUDPServerStandalone(t *testing.T) {
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen backend: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	logger := logx.New(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cSide, sSide := newMockPacketConn()
+	go Handle(ctx, logger, sSide, backendAddr)
+
+	time.Sleep(30 * time.Millisecond)
+
+	// Client sends to backend
+	_, _ = cSide.Write([]byte("ping-standalone"))
+	buf := make([]byte, 1024)
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, sender, err := backend.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read backend: %v", err)
+	}
+	if string(buf[:n]) != "ping-standalone" {
+		t.Fatalf("got %s, want ping-standalone", string(buf[:n]))
+	}
+
+	// Backend replies
+	_, _ = backend.WriteTo([]byte("pong-standalone"), sender)
+	select {
+	case pkt := <-cSide.readCh:
+		if string(pkt) != "pong-standalone" {
+			t.Fatalf("got %s, want pong-standalone", string(pkt))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for standalone reply")
+	}
+}

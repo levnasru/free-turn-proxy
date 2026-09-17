@@ -126,6 +126,10 @@ func main() {
 	logger.Infof("Listening on %s", cfg.Proxy.Listen)
 
 	registry := bondserver.NewRegistry(bondserver.Deps{Log: logger})
+	udpRegistry := udpserver.NewRegistry(udpserver.Deps{
+		Log:       logger,
+		BatchSize: cfg.BatchSize,
+	})
 
 	var db *clientsdb.DB
 	if cfg.ClientsFile != "" {
@@ -157,12 +161,12 @@ func main() {
 			continue
 		}
 		wg.Go(func() {
-			handleAccepted(ctx, logger, registry, db, conn, cfg)
+			handleAccepted(ctx, logger, registry, udpRegistry, db, conn, cfg)
 		})
 	}
 }
 
-func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserver.Registry, db *clientsdb.DB, conn net.Conn, cfg *config.Server) {
+func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserver.Registry, udpRegistry *udpserver.Registry, db *clientsdb.DB, conn net.Conn, cfg *config.Server) {
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil {
 			logger.Warnf("failed to close incoming connection: %s", closeErr)
@@ -210,7 +214,7 @@ func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserve
 	if cfg.Proxy.Mode == config.ProxyModeTCPFwd {
 		tcpfwdserver.Handle(ctx, logger, registry, dtlsConn, cfg.Proxy.Connect, cfg.KCP.Profile, cfg.KCP.FEC)
 	} else {
-		udpserver.Handle(ctx, logger, conn, cfg.Proxy.Connect)
+		udpRegistry.Handle(ctx, logger, conn, cfg.Proxy.Connect, clientID)
 	}
 
 	logger.Debugf("Connection closed: %s", conn.RemoteAddr())

@@ -184,6 +184,7 @@ type Server struct {
 	Log         LogOpts
 	KCP         KCPOpts
 	ClientsFile string // -clients-file
+	BatchSize   int    // -batch (микробатчинг на бэкенд-эгрессе)
 }
 
 // PeekSubURL вытаскивает значение -sub из сырых args без полного парсинга.
@@ -471,6 +472,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 	obfTiming := fs.Duration("obf-timing", 0, "межпакетная задержка для RTP-мимикрии (напр. 7ms, ~150pps - найденный потолок VK per-session, 2026-09-01); 0=выкл")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	clientsFile := fs.String("clients-file", "", "путь к файлу clients.json для авторизации по Client ID")
+	batch := fs.Int("batch", 4, "размер пачки пакетов в один DTLS-поток перед ротацией (микробатчинг на бэкенд-эгрессе; default 4, 1=попакетный round-robin)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -495,6 +497,10 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 			FEC:     kcptun.FEC{},
 		},
 		ClientsFile: *clientsFile,
+		BatchSize:   *batch,
+	}
+	if s.BatchSize <= 0 {
+		s.BatchSize = 4
 	}
 
 	switch *mode {
