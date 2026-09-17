@@ -13,7 +13,8 @@ const (
 	slotInboundBufferSize = 16
 	defaultBatchSize      = 4
 	sessionIdleGrace      = 2 * time.Minute
-	slotIdleTimeout       = 45 * time.Second
+	slotIdleTimeout       = 10 * time.Minute
+	maxClientSlots        = 60
 )
 
 // Deps объединяет зависимости хост-процесса для UDP-сервера.
@@ -159,6 +160,14 @@ func (s *clientSession) cancelIdleTimer() {
 func (s *clientSession) addSlot(conn net.Conn) *streamSlot {
 	s.slotsMu.Lock()
 	defer s.slotsMu.Unlock()
+
+	// If ungraceful reconnects caused ghost slots to accumulate, prune the oldest
+	for len(s.slots) >= maxClientSlots {
+		oldest := s.slots[0]
+		s.slots = s.slots[1:]
+		oldest.close()
+		s.registry.deps.log().Debugf("udpserver [%s]: pruned stale stream slot %d (capped at %d)", s.clientID, oldest.id, maxClientSlots)
+	}
 
 	bufCap := 4 * s.registry.deps.BatchSize
 	if bufCap < 16 {
