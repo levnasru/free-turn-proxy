@@ -13,6 +13,7 @@ const (
 	slotInboundBufferSize = 16
 	defaultBatchSize      = 4
 	sessionIdleGrace      = 2 * time.Minute
+	slotIdleTimeout       = 45 * time.Second
 )
 
 // Deps объединяет зависимости хост-процесса для UDP-сервера.
@@ -256,7 +257,7 @@ func (s *clientSession) runSlot(ctx context.Context, slot *streamSlot) {
 		default:
 		}
 
-		if err := slot.conn.SetReadDeadline(time.Now().Add(udpIdleTimeout)); err != nil {
+		if err := slot.conn.SetReadDeadline(time.Now().Add(slotIdleTimeout)); err != nil {
 			return
 		}
 		n, err := slot.conn.Read(buf)
