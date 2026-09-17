@@ -105,10 +105,17 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 	slotCtx, cancel := context.WithCancel(ctx)
 	sm.cancels[streamID] = cancel
 
+	bufCap := slotInboundBufferSize
+	if sm.params != nil && sm.params.BatchSize > 0 {
+		if 4*sm.params.BatchSize > bufCap {
+			bufCap = 4 * sm.params.BatchSize
+		}
+	}
+
 	health := newSlotHealth()
 	slot := &slotHandle{
 		streamID:   streamID,
-		inbound:    make(chan *Packet, slotInboundBufferSize),
+		inbound:    make(chan *Packet, bufCap),
 		up:         make(chan struct{}, 1),
 		health:     health,
 		launchedAt: time.Now(),

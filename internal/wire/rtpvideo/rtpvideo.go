@@ -171,13 +171,35 @@ func NewConnFromState(s *State, isServer bool) (*Conn, error) {
 	}, nil
 }
 
-func (c *Conn) HeaderLen() int { return headerLen }
-func (c *Conn) Overhead() int  { return overhead }
+func (c *Conn) HeaderLen() int {
+	c.mu.Lock()
+	legacy := c.isLegacy
+	c.mu.Unlock()
+	if legacy {
+		return opusLegacyHeaderLen
+	}
+	return headerLen
+}
+
+func (c *Conn) Overhead() int {
+	c.mu.Lock()
+	legacy := c.isLegacy
+	c.mu.Unlock()
+	if legacy {
+		return opusLegacyOverhead
+	}
+	return overhead
+}
+
 func (c *Conn) MaxWire(payloadLen int) int {
 	c.mu.Lock()
 	isOpus := c.isOpus
+	legacy := c.isLegacy
 	c.mu.Unlock()
 	if isOpus {
+		if legacy {
+			return opusLegacyOverhead + payloadLen
+		}
 		return opusOverhead + max(payloadLen, opusPadTarget) + markerLen
 	}
 	return overhead + payloadLen + markerLen
