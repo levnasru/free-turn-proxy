@@ -87,7 +87,7 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		return 0, addr, err
 	}
 	wire := buf[:n]
-	if len(wire) < overhead {
+	if len(wire) < legacyOverhead {
 		return 0, addr, errors.New("rtpopus3:packet too short")
 	}
 	m, err := c.conn.Unwrap(wire, p)

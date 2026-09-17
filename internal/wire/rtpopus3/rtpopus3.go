@@ -62,6 +62,11 @@ const (
 	rtpPT     = 0x6F                             // M=0, PT=111 (opus)
 	rtpMarker = 0x80                             // M=1
 
+	// Legacy v1 constants (клиенты до 01.09.2026: rtpExtLen=16, 3 words, без sdes:mid, без padding/маркера)
+	legacyExtLen    = 16
+	legacyHeaderLen = rtpHdrLen + legacyExtLen + nonceLen // 40
+	legacyOverhead  = legacyHeaderLen + tagLen            // 56
+
 	extAudioLevelHdr  = 0x10 // id=1, len=1
 	extTransportHdr   = 0x21 // id=2, len=2
 	extAbsSendTimeHdr = 0x32 // id=3, len=2
@@ -133,6 +138,7 @@ type Conn struct {
 	startTime time.Time // база для abs-send-time; immutable после init
 
 	mu        sync.Mutex
+	isLegacy  bool
 	counter   uint64
 	seq       uint16
 	timestamp uint32
@@ -188,9 +194,47 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 	return c, nil
 }
 
-func (*Conn) HeaderLen() int    { return headerLen }
-func (*Conn) Overhead() int     { return overhead }
-func (*Conn) MaxWire(n int) int { return overhead + max(n, padTarget) + markerLen }
+func (c *Conn) HeaderLen() int {
+	c.mu.Lock()
+	legacy := c.isLegacy
+	c.mu.Unlock()
+	if legacy {
+		return legacyHeaderLen
+	}
+	return headerLen
+}
+
+func (c *Conn) Overhead() int {
+	c.mu.Lock()
+	legacy := c.isLegacy
+	c.mu.Unlock()
+	if legacy {
+		return legacyOverhead
+	}
+	return overhead
+}
+
+func (c *Conn) MaxWire(n int) int {
+	c.mu.Lock()
+	legacy := c.isLegacy
+	c.mu.Unlock()
+	if legacy {
+		return legacyOverhead + n
+	}
+	return overhead + max(n, padTarget) + markerLen
+}
+
+func (c *Conn) IsLegacy() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.isLegacy
+}
+
+func (c *Conn) SetLegacy(legacy bool) {
+	c.mu.Lock()
+	c.isLegacy = legacy
+	c.mu.Unlock()
+}
 
 func randRange(n int) int {
 	if n <= 0 {
@@ -265,24 +309,19 @@ func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
 	if len(dst) < c.MaxWire(len(payload)) {
 		return 0, errors.New("rtpopus3:dst buffer too small")
 	}
-	copy(dst[headerLen:], payload)
+	hLen := c.HeaderLen()
+	copy(dst[hLen:], payload)
 	return c.WrapInPlace(dst, len(payload))
 }
 
-// WrapInPlace кодирует plaintext из buf[HeaderLen:HeaderLen+plainLen] на месте,
-// дополняя его до padTarget байт и trailing markerLen-байтным маркером реальной
-// длины (см. константы) - плоский эквивалент RED/dred по размеру пакета без
-// воспроизведения RFC 2198 framing, которое AEAD всё равно скрывает от внешнего
-// наблюдателя. Send-поля берутся под mu; запись в buf и Seal - без блокировки.
+// WrapInPlace кодирует plaintext из buf[HeaderLen:HeaderLen+plainLen] на месте.
+// Для legacy-клиентов (isLegacy=true) использует v1 framing (rtpExtLen=16, headerLen=40,
+// без padding/маркера). Для современных v2-клиентов дополняет до padTarget байт
+// и trailing markerLen-байтным маркером реальной длины.
+// Send-поля берутся под mu; запись в buf и Seal - без блокировки.
 func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
-	effLen := max(plainLen, padTarget)
-	sealedLen := effLen + markerLen
-	wireLen := overhead + sealedLen
-	if len(buf) < wireLen {
-		return 0, errors.New("rtpopus3:dst buffer too small")
-	}
-
 	c.mu.Lock()
+	legacy := c.isLegacy
 	marker := c.updateAudioState()
 	level := c.audioLevel()
 	seq := c.computeSeq()
@@ -293,6 +332,50 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	ctr := c.counter
 	c.counter++
 	c.mu.Unlock()
+
+	if legacy {
+		wireLen := legacyOverhead + plainLen
+		if len(buf) < wireLen {
+			return 0, errors.New("rtpopus3:dst buffer too small")
+		}
+
+		buf[0] = rtpVerExt
+		pt := byte(rtpPT)
+		if marker {
+			pt |= rtpMarker
+		}
+		buf[1] = pt
+		binary.BigEndian.PutUint16(buf[2:4], seq)
+		binary.BigEndian.PutUint32(buf[4:8], ts)
+		copy(buf[8:12], c.ssrc[:])
+
+		buf[12] = 0xBE
+		buf[13] = 0xDE
+		binary.BigEndian.PutUint16(buf[14:16], 3)
+		buf[16] = extAudioLevelHdr
+		buf[17] = level
+		buf[18] = extTransportHdr
+		binary.BigEndian.PutUint16(buf[19:21], tcc)
+		buf[21] = extAbsSendTimeHdr
+		ast := c.absSendTime()
+		buf[22], buf[23], buf[24] = byte(ast>>16), byte(ast>>8), byte(ast)
+		buf[25], buf[26], buf[27] = 0, 0, 0
+
+		copy(buf[28:32], c.sessionID[:])
+		binary.BigEndian.PutUint64(buf[32:legacyHeaderLen], ctr)
+
+		nonce := buf[28:legacyHeaderLen]
+		aad := buf[:legacyHeaderLen]
+		c.state.aead.Seal(buf[legacyHeaderLen:legacyHeaderLen], nonce, buf[legacyHeaderLen:legacyHeaderLen+plainLen], aad)
+		return wireLen, nil
+	}
+
+	effLen := max(plainLen, padTarget)
+	sealedLen := effLen + markerLen
+	wireLen := overhead + sealedLen
+	if len(buf) < wireLen {
+		return 0, errors.New("rtpopus3:dst buffer too small")
+	}
 
 	buf[0] = rtpVerExt
 	pt := byte(rtpPT)
@@ -349,7 +432,34 @@ func (c *Conn) Unwrap(wire, dst []byte) (int, error) {
 
 // UnwrapInPlace декодирует wire на месте и снимает padding/маркер (см.
 // WrapInPlace), возвращая subslice РЕАЛЬНОГО plaintext внутри wire.
+// Автоматически детектирует legacy v1 пакеты (RFC 8285 ext words == 3)
+// и переключает соединение в legacy-режим для симметричных ответов.
 func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
+	if len(wire) < legacyOverhead {
+		return nil, errors.New("rtpopus3:packet too short")
+	}
+
+	// Проверяем RFC 8285 extension header (offset 12)
+	if len(wire) >= 16 && wire[12] == 0xBE && wire[13] == 0xDE {
+		extWords := binary.BigEndian.Uint16(wire[14:16])
+		if extWords == 3 {
+			// Legacy v1 клиент (rtpExtLen=16, headerLen=40, overhead=56, без padding/маркера)
+			nonce := wire[28:legacyHeaderLen]
+			aad := wire[:legacyHeaderLen]
+			ct := wire[legacyHeaderLen:]
+
+			plain, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
+			if err != nil {
+				return nil, fmt.Errorf("rtpopus3:AEAD open: %w", err)
+			}
+			c.mu.Lock()
+			c.isLegacy = true
+			c.mu.Unlock()
+			return plain, nil
+		}
+	}
+
+	// Modern v2 клиент (rtpExtLen=20, headerLen=44, overhead=60, padTarget=130, marker=2)
 	if len(wire) < overhead+padTarget+markerLen {
 		return nil, errors.New("rtpopus3:packet too short")
 	}
@@ -365,6 +475,9 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	if realLen > len(sealed)-markerLen {
 		return nil, errors.New("rtpopus3:length marker exceeds sealed payload")
 	}
+	c.mu.Lock()
+	c.isLegacy = false
+	c.mu.Unlock()
 	return sealed[:realLen], nil
 }
 

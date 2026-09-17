@@ -302,3 +302,149 @@ func TestWrongKeyFails(t *testing.T) {
 		t.Fatal("expected failure decrypting with wrong key")
 	}
 }
+
+func TestLegacyRoundTrip(t *testing.T) {
+	t.Parallel()
+	key := newKey(t)
+	cli, err := NewConn(key, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.SetLegacy(true)
+
+	srv, err := NewConn(key, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("legacy handshake ClientHello 123456789")
+	buf := make([]byte, cli.MaxWire(len(payload)))
+	copy(buf[cli.HeaderLen():], payload)
+	n, err := cli.WrapInPlace(buf, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Проверяем что wire-размер ровно legacyOverhead (56) + len(payload)
+	if want := legacyOverhead + len(payload); n != want {
+		t.Fatalf("legacy wire len = %d, want %d", n, want)
+	}
+	// Проверяем rtp ext length = 3
+	if w := binary.BigEndian.Uint16(buf[14:16]); w != 3 {
+		t.Fatalf("legacy ext words = %d, want 3", w)
+	}
+
+	// Сервер разворачивает пакет и должен автоматически переключиться в legacy-режим
+	plain, err := srv.UnwrapInPlace(buf[:n])
+	if err != nil {
+		t.Fatalf("server unwrap legacy packet: %v", err)
+	}
+	if !bytes.Equal(plain, payload) {
+		t.Fatalf("server plain mismatch: got %q, want %q", plain, payload)
+	}
+	if !srv.IsLegacy() {
+		t.Fatal("server should have detected legacy mode")
+	}
+
+	// Сервер отвечает клиенту
+	reply := []byte("legacy handshake ServerHello 987654321")
+	replyBuf := make([]byte, srv.MaxWire(len(reply)))
+	copy(replyBuf[srv.HeaderLen():], reply)
+	rn, err := srv.WrapInPlace(replyBuf, len(reply))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := legacyOverhead + len(reply); rn != want {
+		t.Fatalf("server legacy reply wire len = %d, want %d", rn, want)
+	}
+
+	// Клиент разворачивает ответ сервера
+	cliPlain, err := cli.UnwrapInPlace(replyBuf[:rn])
+	if err != nil {
+		t.Fatalf("client unwrap legacy reply: %v", err)
+	}
+	if !bytes.Equal(cliPlain, reply) {
+		t.Fatalf("client plain mismatch: got %q, want %q", cliPlain, reply)
+	}
+}
+
+func TestDualModeServer(t *testing.T) {
+	t.Parallel()
+	key := newKey(t)
+
+	// Два клиента: один legacy, второй modern v2
+	legCli, _ := NewConn(key, false)
+	legCli.SetLegacy(true)
+
+	modCli, _ := NewConn(key, false)
+
+	// Два серверных соединения (по одному на клиента, как в Accept())
+	srvForLeg, _ := NewConn(key, true)
+	srvForMod, _ := NewConn(key, true)
+
+	// 1. Legacy roundtrip через WrapInto
+	legPayload := []byte("dtls client hello from old app")
+	legWire := make([]byte, legCli.MaxWire(len(legPayload)))
+	ln, err := legCli.WrapInto(legWire, legPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvLegPlain := make([]byte, len(legPayload))
+	sln, err := srvForLeg.Unwrap(legWire[:ln], srvLegPlain)
+	if err != nil {
+		t.Fatalf("srv unwrap leg: %v", err)
+	}
+	if !bytes.Equal(srvLegPlain[:sln], legPayload) {
+		t.Fatalf("srv leg mismatch")
+	}
+	if !srvForLeg.IsLegacy() {
+		t.Fatal("srvForLeg must be legacy")
+	}
+
+	// 2. Modern roundtrip через WrapInto
+	modPayload := []byte("dtls client hello from new app with padding")
+	modWire := make([]byte, modCli.MaxWire(len(modPayload)))
+	mn, err := modCli.WrapInto(modWire, modPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvModPlain := make([]byte, len(modPayload))
+	smn, err := srvForMod.Unwrap(modWire[:mn], srvModPlain)
+	if err != nil {
+		t.Fatalf("srv unwrap mod: %v", err)
+	}
+	if !bytes.Equal(srvModPlain[:smn], modPayload) {
+		t.Fatalf("srv mod mismatch")
+	}
+	if srvForMod.IsLegacy() {
+		t.Fatal("srvForMod must NOT be legacy")
+	}
+
+	// 3. Серверные ответы обоим
+	legResp := []byte("legacy ok")
+	legRespWire := make([]byte, srvForLeg.MaxWire(len(legResp)))
+	lrn, err := srvForLeg.WrapInto(legRespWire, legResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legCliPlain := make([]byte, len(legResp))
+	if _, err := legCli.Unwrap(legRespWire[:lrn], legCliPlain); err != nil {
+		t.Fatalf("leg cli unwrap: %v", err)
+	}
+	if !bytes.Equal(legCliPlain, legResp) {
+		t.Fatal("leg cli plain mismatch")
+	}
+
+	modResp := []byte("modern ok")
+	modRespWire := make([]byte, srvForMod.MaxWire(len(modResp)))
+	mrn, err := srvForMod.WrapInto(modRespWire, modResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modCliPlain := make([]byte, len(modResp))
+	if _, err := modCli.Unwrap(modRespWire[:mrn], modCliPlain); err != nil {
+		t.Fatalf("mod cli unwrap: %v", err)
+	}
+	if !bytes.Equal(modCliPlain, modResp) {
+		t.Fatal("mod cli plain mismatch")
+	}
+}
