@@ -189,20 +189,26 @@ func (d *dispatcher) rotateManual() {
 // осознанный откат, не забытая недоделка.
 func (d *dispatcher) route(pkt *Packet) {
 	d.mu.Lock()
-	if len(d.slots) == 0 {
+	n := len(d.slots)
+	if n == 0 {
 		d.mu.Unlock()
 		packetPool.Put(pkt)
 		return
 	}
-	target := d.slots[d.roundRobin%len(d.slots)]
+	startIdx := d.roundRobin
 	d.roundRobin++
+	slots := d.slots
 	d.mu.Unlock()
 
-	select {
-	case target.inbound <- pkt:
-	default:
-		packetPool.Put(pkt)
+	for i := 0; i < n; i++ {
+		target := slots[(startIdx+i)%n]
+		select {
+		case target.inbound <- pkt:
+			return
+		default:
+		}
 	}
+	packetPool.Put(pkt)
 }
 
 // run - главный цикл диспетчера: единственный читатель inboundChan,

@@ -255,3 +255,28 @@ func TestDispatcherRemoveSlot(t *testing.T) {
 		}
 	})
 }
+
+func TestDispatcherSkipsFullSlotRoundRobin(t *testing.T) {
+	t.Parallel()
+	d := newDispatcher()
+	s1, s2 := newTestSlot(1), newTestSlot(2)
+	d.setSlots([]*slotHandle{s1, s2}, 1)
+
+	// Fill slot 1's inbound buffer completely (cap = slotInboundBufferSize)
+	for i := 0; i < slotInboundBufferSize; i++ {
+		s1.inbound <- &Packet{Data: []byte("fill"), N: 4}
+	}
+
+	// Route a packet. Round-robin pointer starts at s1, but s1 is full.
+	// Dispatcher must route to s2 rather than dropping the packet.
+	pkt := &Packet{Data: []byte("hello"), N: 5}
+	d.route(pkt)
+
+	if len(s2.inbound) != 1 {
+		t.Fatalf("expected packet to be routed to s2 when s1 is full, got %d packets in s2", len(s2.inbound))
+	}
+	received := <-s2.inbound
+	if string(received.Data[:received.N]) != "hello" {
+		t.Fatalf("expected 'hello', got %s", string(received.Data[:received.N]))
+	}
+}

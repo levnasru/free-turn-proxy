@@ -5,6 +5,7 @@ package mobile
 import (
 	"net"
 	"syscall"
+	"time"
 )
 
 // SendFD connects to the Unix socket at protectPath and sends fd via SCM_RIGHTS.
@@ -13,7 +14,14 @@ func SendFD(protectPath string, fd int) error {
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialUnix("unix", nil, addr)
+	var conn *net.UnixConn
+	for attempt := 0; attempt < 5; attempt++ {
+		conn, err = net.DialUnix("unix", nil, addr)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if err != nil {
 		return err
 	}

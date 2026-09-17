@@ -205,7 +205,7 @@ func (sm *sessionManager) growHotSet(ctx context.Context, wg *sync.WaitGroup) {
 // No-op if only one slot remains (never shrink to zero) or the dispatcher
 // refuses the removal (target became active between the read and the
 // removal - same TOCTOU class replaceSlot guards against).
-func (sm *sessionManager) shrinkHotSet() {
+func (sm *sessionManager) shrinkHotSet(ctx context.Context) {
 	slots := sm.disp.currentSlots()
 	if len(slots) <= 1 {
 		return
@@ -225,8 +225,18 @@ func (sm *sessionManager) shrinkHotSet() {
 	}
 
 	if cancel, ok := sm.cancels[retireID]; ok {
-		cancel()
 		delete(sm.cancels, retireID)
+		// Даём retiring-слоту graceful drain период (5 секунд), чтобы
+		// дослать уже находящиеся в очереди пакеты и принять ответы с сервера,
+		// пока серверный WireGuard переключается на оставшиеся активные потоки.
+		go func(c context.CancelFunc) {
+			select {
+			case <-ctx.Done():
+				c()
+			case <-time.After(5 * time.Second):
+				c()
+			}
+		}(cancel)
 	}
 	sm.mu.Lock()
 	delete(sm.groups, retireID)
@@ -450,12 +460,12 @@ func (sm *sessionManager) refreshLoop(ctx context.Context, wg *sync.WaitGroup, g
 		case <-growCh:
 			sm.growHotSet(ctx, wg)
 		case <-shrinkCh:
-			sm.shrinkHotSet()
+			sm.shrinkHotSet(ctx)
 		case delta := <-sm.autoCh:
 			if delta > 0 {
 				sm.growHotSet(ctx, wg)
 			} else {
-				sm.shrinkHotSet()
+				sm.shrinkHotSet(ctx)
 			}
 		case <-autoToggleCh:
 			on := !sm.autoEnabled.Load()
@@ -535,8 +545,15 @@ func (sm *sessionManager) refreshOne(ctx context.Context, wg *sync.WaitGroup) {
 	}
 
 	if cancel, ok := sm.cancels[retireID]; ok {
-		cancel()
 		delete(sm.cancels, retireID)
+		go func(c context.CancelFunc) {
+			select {
+			case <-ctx.Done():
+				c()
+			case <-time.After(5 * time.Second):
+				c()
+			}
+		}(cancel)
 	}
 	sm.mu.Lock()
 	delete(sm.groups, retireID)
