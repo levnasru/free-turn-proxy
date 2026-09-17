@@ -159,10 +159,15 @@ func (s *clientSession) addSlot(conn net.Conn) *streamSlot {
 	s.slotsMu.Lock()
 	defer s.slotsMu.Unlock()
 
+	bufCap := 4 * s.registry.deps.BatchSize
+	if bufCap < 16 {
+		bufCap = 16
+	}
+
 	slot := &streamSlot{
 		id:      s.nextSlotID,
 		conn:    conn,
-		inbound: make(chan []byte, slotInboundBufferSize),
+		inbound: make(chan []byte, bufCap),
 		done:    make(chan struct{}),
 	}
 	s.nextSlotID++
