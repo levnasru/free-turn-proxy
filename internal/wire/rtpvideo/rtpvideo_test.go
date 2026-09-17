@@ -127,3 +127,54 @@ func TestRTPVideoOpusBackwardCompatibility(t *testing.T) {
 		t.Fatalf("client received payload mismatch: %s != %s", clientReceived, replyMsg)
 	}
 }
+
+func TestRTPVideoToRTPOpus3ServerAndBack(t *testing.T) {
+	key := make([]byte, KeyLen)
+	_, _ = rand.Read(key)
+
+	cli, err := NewConn(key, false)
+	if err != nil {
+		t.Fatalf("cli: %v", err)
+	}
+	srv, err := rtpopus3.NewConn(key, true)
+	if err != nil {
+		t.Fatalf("srv: %v", err)
+	}
+
+	cliPayload := []byte("client-vp8-video-message-12345")
+	cliBuf := make([]byte, cli.MaxWire(len(cliPayload)))
+	copy(cliBuf[cli.HeaderLen():], cliPayload)
+
+	cn, err := cli.WrapInPlace(cliBuf, len(cliPayload))
+	if err != nil {
+		t.Fatalf("cli wrap: %v", err)
+	}
+
+	srvPlain, err := srv.UnwrapInPlace(cliBuf[:cn])
+	if err != nil {
+		t.Fatalf("srv unwrap: %v", err)
+	}
+	if !bytes.Equal(srvPlain, cliPayload) {
+		t.Fatalf("srv plain mismatch: %s != %s", srvPlain, cliPayload)
+	}
+	if !srv.IsVideo() {
+		t.Fatal("srv must be marked as IsVideo()")
+	}
+
+	srvReply := []byte("server-response-to-vp8-67890")
+	srvBuf := make([]byte, srv.MaxWire(len(srvReply)))
+	copy(srvBuf[srv.HeaderLen():], srvReply)
+
+	sn, err := srv.WrapInPlace(srvBuf, len(srvReply))
+	if err != nil {
+		t.Fatalf("srv wrap: %v", err)
+	}
+
+	cliPlain, err := cli.UnwrapInPlace(srvBuf[:sn])
+	if err != nil {
+		t.Fatalf("cli unwrap: %v", err)
+	}
+	if !bytes.Equal(cliPlain, srvReply) {
+		t.Fatalf("cli plain mismatch: %s != %s", cliPlain, srvReply)
+	}
+}
