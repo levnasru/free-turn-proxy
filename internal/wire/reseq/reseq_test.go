@@ -241,3 +241,49 @@ func TestResequencerSequenceReset(t *testing.T) {
 		t.Errorf("expected packets 1 and 2 after reset, got %v", delivered[100:])
 	}
 }
+
+func TestResequencerStats(t *testing.T) {
+	var delivered []int
+	var mu sync.Mutex
+	r := New(20*time.Millisecond, func(payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, int(payload[0]))
+	})
+	defer r.Close()
+
+	r.Push(1, []byte{1})
+	r.Push(3, []byte{3})
+	// Wait for gap 2 to expire
+	time.Sleep(35 * time.Millisecond)
+
+	// Late packet 2 arrives (timed-out gap) -> delivered!
+	r.Push(2, []byte{2})
+
+	// Duplicate of already-delivered packet 3 arrives -> dropped!
+	r.Push(3, []byte{3})
+
+	st := r.Stats()
+	if st.Pushed != 4 {
+		t.Errorf("expected Pushed=4, got %d", st.Pushed)
+	}
+	if st.Delivered != 2 { // 1 and 3 delivered contiguous
+		t.Errorf("expected Delivered=2, got %d", st.Delivered)
+	}
+	if st.GapsTimedOut != 1 { // gap 2 timed out
+		t.Errorf("expected GapsTimedOut=1, got %d", st.GapsTimedOut)
+	}
+	if st.LateDelivered != 1 { // late 2 delivered
+		t.Errorf("expected LateDelivered=1, got %d", st.LateDelivered)
+	}
+	if st.StaleDropped != 1 { // duplicate 1 dropped
+		t.Errorf("expected StaleDropped=1, got %d", st.StaleDropped)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Delivered should contain 1, 3, and then 2!
+	if len(delivered) != 3 || delivered[0] != 1 || delivered[1] != 3 || delivered[2] != 2 {
+		t.Errorf("expected delivered [1, 3, 2], got %v", delivered)
+	}
+}

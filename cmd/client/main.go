@@ -34,6 +34,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/sub"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
+	"github.com/samosvalishe/free-turn-proxy/internal/transport/stunprobe"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
 	"github.com/samosvalishe/free-turn-proxy/mobile"
 )
@@ -157,6 +158,8 @@ func main() {
 		}
 		return c.User, c.Pass, c.ServerAddrs, nil
 	}
+	ranker := stunprobe.NewRanker(stunprobe.Config{Log: logger})
+	getCreds = ranker.WrapGetCreds(getCreds)
 
 	// Несколько -links (vk) или несколько -hub-url (hub) расширяют пул: каждый
 	// аккаунт даёт cfg.TURN.N стримов, все объединяются в общий пул (больше
@@ -207,7 +210,7 @@ func main() {
 	growCh := make(chan struct{}, 1)
 	shrinkCh := make(chan struct{}, 1)
 	autoToggleCh := make(chan struct{}, 1)
-	go readManualCommands(ctx, logger, rotateCh, growCh, shrinkCh, autoToggleCh)
+	go readManualCommands(ctx, logger, rotateCh, growCh, shrinkCh, autoToggleCh, ranker.Invalidate)
 
 	udpDtlsDialer := &dtlsdial.Dialer{
 		HandshakeTimeout: 20 * time.Second,
@@ -427,7 +430,7 @@ func logTrafficStats(ctx context.Context, logger logx.Logger, s *stats.Stats) {
 // автоскейлера K (Шаг 4, см. internal/proxy/udprelay/autoscale.go и
 // docs/hotset-autoscaler.md), который включён по умолчанию, то есть первая
 // команда "auto" его ВЫКЛЮЧАЕТ. Всё это только в -transport udp.
-func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growCh, shrinkCh, autoCh chan<- struct{}) {
+func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growCh, shrinkCh, autoCh chan<- struct{}, invalidateFn func()) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -458,6 +461,10 @@ func readManualCommands(ctx context.Context, logger logx.Logger, rotateCh, growC
 			default:
 			}
 			logger.Infof("[auto] hot-set autoscaler toggle requested")
+		case "handover", "probe-reset":
+			if invalidateFn != nil {
+				invalidateFn()
+			}
 		}
 	}
 }

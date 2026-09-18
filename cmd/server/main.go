@@ -100,6 +100,7 @@ func main() {
 		// меньше KCP-окна, легитимные задержавшиеся сегменты тихо дропались
 		// бы как replay.
 		dtls.WithReplayProtectionWindow(dtlsdial.DefaultReplayProtectionWindow),
+		dtls.WithMTU(dtlsdial.DefaultDTLSMTU),
 	}
 	var listener net.Listener
 	if cfg.Obf.Enabled() {

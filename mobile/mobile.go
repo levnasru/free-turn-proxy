@@ -33,6 +33,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/sub"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
+	"github.com/samosvalishe/free-turn-proxy/internal/transport/stunprobe"
 )
 
 // State — состояние подключения.
@@ -86,6 +87,7 @@ var (
 	runWG      sync.WaitGroup // сигналит, когда udprelay/tcpfwd.Run реально вернулся (TURN-аллокации освобождены)
 
 	activeRotateCh atomic.Pointer[chan struct{}]
+	activeRanker   atomic.Pointer[stunprobe.Ranker]
 )
 
 // TriggerRotate запрашивает немедленное переключение активного слота
@@ -103,6 +105,14 @@ func TriggerRotate() {
 	select {
 	case *p <- struct{}{}:
 	default:
+	}
+}
+
+// InvalidateProbes сбрасывает закэшированные замеры STUN-задержек (например, при смене сети / handover).
+// gomobile экспортирует функцию без параметров, что позволяет Swift/Kotlin дергать её при смене интерфейса.
+func InvalidateProbes() {
+	if r := activeRanker.Load(); r != nil {
+		r.Invalidate()
 	}
 }
 
@@ -323,6 +333,10 @@ func startWithArgs(args []string, clientType string) error {
 			}
 			return c.User, c.Pass, c.ServerAddrs, nil
 		}
+		ranker := stunprobe.NewRanker(stunprobe.Config{Log: logger})
+		activeRanker.Store(ranker)
+		defer activeRanker.CompareAndSwap(ranker, nil)
+		getCreds = ranker.WrapGetCreds(getCreds)
 
 		providerCount := len(cfg.VK.Links)
 		if cfg.Provider.Name == config.ProviderHub {
@@ -451,6 +465,7 @@ func Stop() {
 		running.Store(false)
 		sessionGen.Add(1)
 		trafficVal.Store(nil)
+		activeRanker.Store(nil)
 	}
 	mu.Unlock()
 

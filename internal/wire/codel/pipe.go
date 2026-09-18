@@ -31,6 +31,7 @@ type End struct {
 func NewPipe(outboundHardCap, inboundHardCap int) (a, b *End) {
 	outQ := NewQueue(outboundHardCap)
 	inQ := NewQueue(inboundHardCap)
+	inQ.SetNoCoDel(true)
 	a = &End{writeQ: outQ, readQ: inQ}
 	b = &End{writeQ: inQ, readQ: outQ}
 	return a, b
@@ -57,6 +58,11 @@ func (e *End) WriteTo(p []byte, _ net.Addr) (int, error) {
 
 func (e *End) Write(p []byte) (int, error) {
 	return e.WriteTo(p, nil)
+}
+
+// SetNoCoDel toggles CoDel drop logic on the read queue of this End.
+func (e *End) SetNoCoDel(v bool) {
+	e.readQ.SetNoCoDel(v)
 }
 
 // Close закрывает ОБЕ очереди пары - как у cbeuw/connutil.PacketPipe.Close,

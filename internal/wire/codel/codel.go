@@ -58,6 +58,7 @@ type Queue struct {
 	closed bool
 
 	hardCap int
+	noCoDel bool
 
 	// Состояние CoDel (RFC 8289 §5.2)
 	dropping       bool
@@ -210,6 +211,11 @@ func (q *Queue) Pop() ([]byte, error) {
 			continue
 		}
 
+		if q.noCoDel {
+			q.popped++
+			return r.it.data, nil
+		}
+
 		if q.dropping {
 			if !r.okToDrop {
 				// Задержка упала ниже Target или очередь опустела — выходим из drop state
@@ -249,6 +255,13 @@ func (q *Queue) Pop() ([]byte, error) {
 			return r.it.data, nil
 		}
 	}
+}
+
+// SetNoCoDel toggles CoDel drop logic on/off (pure FIFO queue).
+func (q *Queue) SetNoCoDel(v bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.noCoDel = v
 }
 
 // Close закрывает очередь.

@@ -179,6 +179,23 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 		sm.run(runCtx, inboundChan, params.RotateCh, params.GrowCh, params.ShrinkCh, params.AutoToggleCh)
 	})
 
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				st := downlinkReseq.Stats()
+				if st.Pushed > 0 {
+					logger.Debugf("[Reseq Downlink] pushed=%d delivered=%d lateDelivered=%d gapsTimedOut=%d overrun=%d",
+						st.Pushed, st.Delivered, st.LateDelivered, st.GapsTimedOut, st.WindowOverrun)
+				}
+			}
+		}
+	}()
+
 	// При фатальной ошибке отменяем остальные горутины и пробрасываем наверх.
 	// watcherDone синхронизирует watcher-горутину с возвратом Run, обеспечивая
 	// happens-after между store и load fatalErr.

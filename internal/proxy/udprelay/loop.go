@@ -120,9 +120,12 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	defer dtlscancel()
 
 	// codel.NewPipe заменяет безлимитный connutil.AsyncPacketPipe: ограничивает
-	// буферблоат через RFC 8289 CoDel (Target=30ms, Interval=100ms, hardCap=30),
+	// буферблоат через RFC 8289 CoDel (Target=30ms, Interval=100ms, hardCap=30) при активном obf-timing,
 	// предотвращая шторм ретрансмитов TCP при всплесках трафика.
-	conn1, conn2 := codel.NewPipe(0, 0)
+	conn1, conn2 := codel.NewPipe(256, 512)
+	if params.ObfTiming == 0 {
+		conn2.SetNoCoDel(true)
+	}
 	defer func() { _ = conn1.Close() }()
 	defer func() { _ = conn2.Close() }()
 	// TURNLoop может перезапускать oneTURN несколько раз в рамках одного DTLS

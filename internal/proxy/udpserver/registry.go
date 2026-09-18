@@ -126,6 +126,22 @@ func (r *Registry) getOrCreate(ctx context.Context, clientID, connectAddr string
 	r.sessions[key] = s
 
 	go s.readBackendLoop()
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				st := s.uplinkReseq.Stats()
+				if st.Pushed > 0 {
+					s.registry.deps.log().Debugf("udpserver [%s]: [Reseq Uplink] pushed=%d delivered=%d lateDelivered=%d gapsTimedOut=%d overrun=%d",
+						s.clientID, st.Pushed, st.Delivered, st.LateDelivered, st.GapsTimedOut, st.WindowOverrun)
+				}
+			}
+		}
+	}()
 	r.deps.log().Infof("udpserver [%s]: created shared backend session -> %s (local %s)",
 		clientID, connectAddr, backendConn.LocalAddr())
 	return s, nil
@@ -239,9 +255,9 @@ func (s *clientSession) addSlot(conn net.Conn) *streamSlot {
 		s.registry.deps.log().Debugf("udpserver [%s]: pruned stale stream slot %d (capped at %d)", s.clientID, oldest.id, maxClientSlots)
 	}
 
-	bufCap := 4 * s.registry.deps.BatchSize
-	if bufCap < 16 {
-		bufCap = 16
+	bufCap := 16 * s.registry.deps.BatchSize
+	if bufCap < 128 {
+		bufCap = 128
 	}
 
 	slot := &streamSlot{

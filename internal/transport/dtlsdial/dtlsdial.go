@@ -26,6 +26,13 @@ func GenerateSelfSignedCert() (tls.Certificate, error) {
 // окном KCP), только чтобы обе стороны совпадали.
 const DefaultReplayProtectionWindow = 1024
 
+// DefaultDTLSMTU restricts the maximum transmission unit of DTLS packets.
+// By default pion/dtls uses 1200 bytes, which when combined with rtpvideo (62B),
+// TURN ChannelData (4B), UDP (8B), and IPv6 (40B) produces 1314B datagrams.
+// Cellular networks (e.g. MTS IPv6 MTU 1300) drop >1300B packets, causing DTLS
+// handshake context deadline exceeded. 1050 produces max 1164B wire packets.
+const DefaultDTLSMTU = 1050
+
 // Dialer конфигурирует DTLS-handshake клиента.
 type Dialer struct {
 	// HandshakeTimeout ограничивает контекст handshake. Ноль - без таймаута.
@@ -71,6 +78,7 @@ func (d *Dialer) Dial(ctx context.Context, pc net.PacketConn, peer *net.UDPAddr)
 		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 		dtls.WithConnectionIDGenerator(dtls.OnlySendCIDGenerator()),
 		dtls.WithReplayProtectionWindow(DefaultReplayProtectionWindow),
+		dtls.WithMTU(DefaultDTLSMTU),
 	)
 	if err != nil {
 		return nil, err
