@@ -17,6 +17,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/reseq"
 )
 
 // GetCredsFunc реэкспортирован из common, чтобы вызывающие не выходили за пределы импортов пакета.
@@ -97,6 +98,8 @@ type Deps struct {
 	Log              logx.Logger
 	ActiveLocalPeer  *atomic.Value
 	ConnectedStreams *atomic.Int32
+	DownlinkReseq    *reseq.Resequencer
+	UplinkSeq        *atomic.Uint32
 	// fatalCh - внутренний сигнальный канал; устанавливается Run, пишется
 	// TURNLoop, читается Run для проброса фатальной ошибки наверх.
 	fatalCh chan error
@@ -134,12 +137,29 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 
 	fatalCh := make(chan error, 1)
 	var activeLocalPeer atomic.Value
+	var uplinkSeq atomic.Uint32
+
+	downlinkReseq := reseq.New(reseq.DefaultDwellTimeout, func(payload []byte) {
+		if peerAddr := activeLocalPeer.Load(); peerAddr != nil {
+			if addr, ok := peerAddr.(net.Addr); ok {
+				if _, err := listenConn.WriteTo(payload, addr); err != nil {
+					logger.Errorf("udprelay: failed to forward resequenced packet to local peer: %v", err)
+				}
+			}
+		} else {
+			logger.Warnf("udprelay: activeLocalPeer is NIL! cannot forward %d bytes", len(payload))
+		}
+	})
+	defer downlinkReseq.Close()
+
 	deps := &Deps{
 		DTLSDialer:       dtlsDialer,
 		Auth:             auth,
 		Log:              logger,
 		ActiveLocalPeer:  &activeLocalPeer,
 		ConnectedStreams: connectedStreams,
+		DownlinkReseq:    downlinkReseq,
+		UplinkSeq:        &uplinkSeq,
 		fatalCh:          fatalCh,
 	}
 

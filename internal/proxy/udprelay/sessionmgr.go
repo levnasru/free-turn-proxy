@@ -68,7 +68,7 @@ func newSessionManager(deps *Deps, params *Params, peer *net.UDPAddr, listenConn
 		listenConn: listenConn,
 		k:          k,
 		t:          t,
-		disp:       newDispatcherWithBatch(batchSize),
+		disp:       newDispatcherWithBatchAndSeq(batchSize, deps.UplinkSeq),
 		grad:       newGradientTracker(),
 		baseK:      k,
 		auto:       &autoscaleDecider{},

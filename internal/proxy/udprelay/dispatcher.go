@@ -2,8 +2,13 @@ package udprelay
 
 import (
 	"context"
+	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/samosvalishe/free-turn-proxy/internal/randx"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/reseq"
 )
 
 // slotHandle is what the dispatcher needs to route packets to, and observe
@@ -52,6 +57,8 @@ type dispatcher struct {
 	roundRobin int // индекс для route()'s round-robin по всем слотам
 	burstCount int // число пакетов, уже отправленных в текущий слот в рамках батча
 	batchSize  int // размер батча (по умолчанию defaultBatchSize)
+	epoch      uint16
+	uplinkSeq  *atomic.Uint32
 }
 
 func newDispatcher() *dispatcher {
@@ -59,10 +66,15 @@ func newDispatcher() *dispatcher {
 }
 
 func newDispatcherWithBatch(batchSize int) *dispatcher {
+	return newDispatcherWithBatchAndSeq(batchSize, nil)
+}
+
+func newDispatcherWithBatchAndSeq(batchSize int, uplinkSeq *atomic.Uint32) *dispatcher {
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
 	}
-	return &dispatcher{batchSize: batchSize}
+	epoch := uint16(randx.Intn(0xFFFE) + 1)
+	return &dispatcher{batchSize: batchSize, epoch: epoch, uplinkSeq: uplinkSeq}
 }
 
 // setSlots (пере)задаёт состав hot-set'а. keepActiveStreamID - какой слот
@@ -219,6 +231,16 @@ func (d *dispatcher) route(pkt *Packet) {
 		bs = defaultBatchSize
 	}
 	d.mu.Unlock()
+
+	if d.uplinkSeq != nil && pkt.N > 0 && pkt.N+reseq.HeaderLen <= cap(pkt.Data) {
+		seq := d.uplinkSeq.Add(1)
+		copy(pkt.Data[reseq.HeaderLen:], pkt.Data[:pkt.N])
+		pkt.Data[0] = reseq.Magic
+		pkt.Data[1] = reseq.FlagData
+		binary.BigEndian.PutUint16(pkt.Data[2:4], d.epoch)
+		binary.BigEndian.PutUint32(pkt.Data[4:8], seq)
+		pkt.N += reseq.HeaderLen
+	}
 
 	for i := 0; i < n; i++ {
 		idx := (startIdx + i) % n

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/logx"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/reseq"
 )
 
 // mockPacketConn emulates a DTLS datagram connection in memory.
@@ -327,3 +328,196 @@ func TestUDPServerStandalone(t *testing.T) {
 		t.Fatalf("timeout waiting for standalone reply")
 	}
 }
+
+func TestUDPServerResequencingMultiStream(t *testing.T) {
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen backend: %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+	backendAddr := backend.LocalAddr().String()
+
+	logger := logx.Nop()
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 2})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clientID := "client-reseq-test"
+	c1, s1 := newMockPacketConn()
+	c2, s2 := newMockPacketConn()
+
+	go reg.Handle(ctx, logger, s1, backendAddr, clientID)
+	go reg.Handle(ctx, logger, s2, backendAddr, clientID)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		reg.mu.Lock()
+		sess := reg.sessions[clientID+"@"+backendAddr]
+		reg.mu.Unlock()
+		if sess != nil {
+			sess.slotsMu.Lock()
+			count := len(sess.slots)
+			sess.slotsMu.Unlock()
+			if count == 2 {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Logf("sending p1")
+	p1 := reseq.Wrap(nil, []byte("data-1"), 1, 0)
+	_, _ = c1.Write(p1)
+
+	t.Logf("sending p3")
+	p3 := reseq.Wrap(nil, []byte("data-3"), 3, 0)
+	_, _ = c2.Write(p3)
+
+	t.Logf("sending p2")
+	p2 := reseq.Wrap(nil, []byte("data-2"), 2, 0)
+	_, _ = c1.Write(p2)
+
+	buf := make([]byte, 1024)
+	var received []string
+	for i := 0; i < 3; i++ {
+		_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, rerr := backend.ReadFrom(buf)
+		if rerr != nil {
+			t.Fatalf("failed reading packet %d from backend: %v", i+1, rerr)
+		}
+		t.Logf("received packet %d: %s", i+1, string(buf[:n]))
+		received = append(received, string(buf[:n]))
+	}
+
+	if received[0] != "data-1" || received[1] != "data-2" || received[2] != "data-3" {
+		t.Fatalf("expected packets in order [data-1, data-2, data-3], got %v", received)
+	}
+
+	// Now test downlink: backend sends reply
+	// Get sender from backend
+	_ = backend.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	// Send another packet from client so backend has sender
+	p4 := reseq.Wrap(nil, []byte("ping"), 4, 0)
+	_, _ = c1.Write(p4)
+	n, sender, err := backend.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read ping: %v", err)
+	}
+	if string(buf[:n]) != "ping" {
+		t.Fatalf("got %s, want ping", string(buf[:n]))
+	}
+
+	// Backend replies
+	_, _ = backend.WriteTo([]byte("downlink-data"), sender)
+
+	// One of the client streams must receive the packet wrapped with reseq
+	var gotDownlink []byte
+	select {
+	case pkt := <-c1.readCh:
+		gotDownlink = pkt
+	case pkt := <-c2.readCh:
+		gotDownlink = pkt
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for downlink packet")
+	}
+
+	if !reseq.IsReseq(gotDownlink) {
+		t.Fatalf("downlink packet should have reseq magic 0xD5, got %v", gotDownlink)
+	}
+	seq, _, payload, ok := reseq.Unwrap(gotDownlink)
+	if !ok || string(payload) != "downlink-data" || seq == 0 {
+		t.Fatalf("invalid reseq unwrap: ok=%v, seq=%d, payload=%s", ok, seq, string(payload))
+	}
+}
+
+func TestUDPServerEpochGhostSlotElimination(t *testing.T) {
+	logger := logx.New(false)
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("backend listen: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	clientID := "client-epoch-test"
+	s1, c1 := newMockPacketConn()
+	s2, c2 := newMockPacketConn()
+
+	go reg.Handle(ctx, logger, s1, backendAddr, clientID)
+
+	// Wait for slot 1
+	time.Sleep(20 * time.Millisecond)
+
+	// Send packet with epoch 100 on slot 1
+	p1 := reseq.Wrap(nil, []byte("epoch-100-data"), 1, 100)
+	_, _ = c1.Write(p1)
+
+	buf := make([]byte, 1024)
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, rerr := backend.ReadFrom(buf)
+	if rerr != nil {
+		t.Fatalf("read backend epoch 100: %v", rerr)
+	}
+	if string(buf[:n]) != "epoch-100-data" {
+		t.Fatalf("got %s, want epoch-100-data", string(buf[:n]))
+	}
+
+	// Now client restarts! Slot 2 connects with epoch 200
+	go reg.Handle(ctx, logger, s2, backendAddr, clientID)
+	time.Sleep(20 * time.Millisecond)
+
+	// Send packet with epoch 200 on slot 2
+	p2 := reseq.Wrap(nil, []byte("epoch-200-handshake"), 1, 200)
+	_, _ = c2.Write(p2)
+
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, sender2, rerr := backend.ReadFrom(buf)
+	if rerr != nil {
+		t.Fatalf("read backend epoch 200: %v", rerr)
+	}
+	if string(buf[:n]) != "epoch-200-handshake" {
+		t.Fatalf("got %s, want epoch-200-handshake", string(buf[:n]))
+	}
+
+	// Verify that session pruned slot 1!
+	reg.mu.Lock()
+	sess := reg.sessions[clientID+"@"+backendAddr]
+	reg.mu.Unlock()
+	if sess == nil {
+		t.Fatalf("session is nil")
+	}
+
+	sess.slotsMu.Lock()
+	slotCount := len(sess.slots)
+	sessEpoch := sess.currentEpoch
+	sess.slotsMu.Unlock()
+
+	if sessEpoch != 200 {
+		t.Errorf("expected session epoch 200, got %d", sessEpoch)
+	}
+	if slotCount != 1 {
+		t.Errorf("expected exactly 1 slot after pruning ghost slot, got %d", slotCount)
+	}
+
+	// Backend replies to sender2: downlink MUST go to c2, NOT c1
+	_, _ = backend.WriteTo([]byte("downlink-reply"), sender2)
+
+	select {
+	case pkt := <-c2.readCh:
+		seq, ep, payload, ok := reseq.Unwrap(pkt)
+		if !ok || ep != 200 || seq != 1 || string(payload) != "downlink-reply" {
+			t.Fatalf("unexpected downlink on c2: ok=%v ep=%d seq=%d payload=%s", ok, ep, seq, string(payload))
+		}
+	case pkt := <-c1.readCh:
+		t.Fatalf("downlink was routed to dead ghost slot c1! pkt=%v", pkt)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for downlink on c2")
+	}
+}
+

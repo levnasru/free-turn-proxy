@@ -14,6 +14,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/codel"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/reseq"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
@@ -195,6 +196,13 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			n, err1 := dtlsConn.Read(buf)
 			if err1 != nil {
 				return
+			}
+
+			if deps.DownlinkReseq != nil {
+				if seq, _, payload, ok := reseq.Unwrap(buf[:n]); ok {
+					deps.DownlinkReseq.Push(seq, payload)
+					continue
+				}
 			}
 
 			if peerAddr := deps.ActiveLocalPeer.Load(); peerAddr != nil {
