@@ -7,125 +7,15 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 env:
   GO_VERSION: "1.26.5"
   GORELEASER_VERSION: v2.17.1
-  GOMOBILE_VERSION: latest
-  TASK_VERSION: 3.52.0
 
 jobs:
-  build-ios:
-    name: Build iOS XCFramework
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - uses: arduino/setup-task@v2.0.0
-        with:
-          version: ${{ env.TASK_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install gomobile
-        run: |
-          go install golang.org/x/mobile/cmd/gomobile@${{ env.GOMOBILE_VERSION }}
-          gomobile init
-
-      - name: Build XCFramework
-        run: task build:ios
-
-      - name: Zip XCFramework
-        run: cd dist && zip -r Mobile.xcframework.zip Mobile.xcframework
-
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: ios-xcframework-zip
-          path: dist/Mobile.xcframework.zip
-          retention-days: 7
-
-  build-desktop-macos:
-    name: Build desktop client (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Build client+xray for desktop embed (macOS)
-        run: |
-          mkdir -p cmd/desktop/embedded/darwin_amd64 cmd/desktop/embedded/darwin_arm64
-          rm -f cmd/desktop/embedded/darwin_amd64/client cmd/desktop/embedded/darwin_arm64/client cmd/desktop/embedded/darwin_amd64/xray cmd/desktop/embedded/darwin_arm64/xray
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/darwin_amd64/client ./cmd/client
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/darwin_arm64/client ./cmd/client
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o cmd/desktop/embedded/darwin_amd64/xray github.com/xtls/xray-core/main
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o cmd/desktop/embedded/darwin_arm64/xray github.com/xtls/xray-core/main
-
-      - name: Build vkturn-desktop for macOS
-        env:
-          CGO_ENABLED: 1
-        run: |
-          # Hardcoded, not the tag: cmd/desktop versions independently of the
-          # repo's shared tag - see .goreleaser.yaml's desktop build for why.
-          # Keep this in sync with that file's ldflags by hand.
-          VERSION="1.0.0"
-          mkdir -p dist-desktop-macos
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o dist-desktop-macos/vkturn-desktop-darwin-amd64 ./cmd/desktop
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o dist-desktop-macos/vkturn-desktop-darwin-arm64 ./cmd/desktop
-
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: desktop-macos-dist
-          path: dist-desktop-macos/
-          retention-days: 7
-
-  build-android:
-    name: Build Android AAR
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - uses: arduino/setup-task@v2.0.0
-        with:
-          version: ${{ env.TASK_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Android NDK
-        run: |
-          NDK_DIR=$(ls -d $ANDROID_SDK_ROOT/ndk/*/ 2>/dev/null | sort -V | tail -n1)
-          echo "ANDROID_NDK_HOME=${NDK_DIR%/}" >> $GITHUB_ENV
-
-      - name: Install gomobile
-        run: |
-          go install golang.org/x/mobile/cmd/gomobile@${{ env.GOMOBILE_VERSION }}
-          gomobile init
-
-      - name: Build AAR
-        run: task build:android
-
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: android-aar
-          path: dist/mobile.aar
-          retention-days: 7
-
   goreleaser:
-    name: GoReleaser
+    name: GoReleaser (vkturn client)
     runs-on: ubuntu-latest
-    needs: [build-ios, build-android, build-desktop-macos]
     steps:
       - uses: actions/checkout@v6.0.2
         with:
@@ -135,113 +25,6 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-
-      - uses: docker/setup-qemu-action@v4.0.0
-
-      - uses: docker/setup-buildx-action@v4.1.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4.2.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install syft (SBOM)
-        uses: anchore/sbom-action/download-syft@v0.24.0
-
-      # desktop's Linux build needs CGO for the system tray (AppIndicator
-      # backend, github.com/getlantern/systray) - see .goreleaser.yaml's
-      # desktop build override.
-      - name: Install Linux tray build deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libayatana-appindicator3-dev libgtk-3-dev
-
-      - uses: actions/download-artifact@v7.0.0
-        with:
-          name: ios-xcframework-zip
-          path: mobile-dist/
-
-      - uses: actions/download-artifact@v7.0.0
-        with:
-          name: android-aar
-          path: mobile-dist/
-
-      - uses: actions/download-artifact@v7.0.0
-        with:
-          name: desktop-macos-dist
-          path: desktop-macos-dist/
-
-      # cmd/desktop embeds client/xray/wintun.dll via go:embed (see
-      # cmd/desktop/embed_linux.go, embed_windows.go, extract.go) and
-      # extracts them to ~/.vkturn/bin/ on first run - so the payload has
-      # to exist under cmd/desktop/embedded/<goos>_<goarch>/ before
-      # goreleaser's own `go build ./cmd/desktop` below runs, or it embeds
-      # empty placeholders. This step populates the `client` half; the
-      # "Build xray CLI" and "Fetch wintun.dll" steps below populate the
-      # rest.
-      - name: Build client for desktop embed
-        run: |
-          mkdir -p cmd/desktop/embedded/linux_amd64 cmd/desktop/embedded/windows_amd64
-          # The committed placeholders at these exact paths (see
-          # cmd/desktop/embedded/README.md) are plain text, not Go objects -
-          # `go build -o` refuses to overwrite an existing file it doesn't
-          # recognize as its own prior output ("already exists and is not
-          # an object file"), so a fresh checkout's build would fail here
-          # without removing them first.
-          rm -f cmd/desktop/embedded/linux_amd64/client cmd/desktop/embedded/windows_amd64/client.exe
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/linux_amd64/client        ./cmd/client
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -checklinkname=0" -o cmd/desktop/embedded/windows_amd64/client.exe ./cmd/client
-
-      # cmd/desktop shells out to a separate `xray` binary (RunXray in
-      # launcher.go) - previously never published, forcing manual sourcing
-      # from upstream Xray-core (see resolveXrayBin's doc comment). Built
-      # here from this repo's own pinned xtls/xray-core dependency to stay
-      # in lockstep with whatever libxray-based config generation cmd/desktop
-      # uses. Plain `go build`, not goreleaser's builds section: goreleaser's
-      # build.main is filesystem-path/stat-based and can't target an
-      # external module's package. Pure Go (no CGO, no build tags -
-      # xray-core's main.go already blank-imports main/distro/all, same as
-      # upstream's official build), so this cross-compiles all 4 targets
-      # from the ubuntu-latest runner directly. Also copies the two targets
-      # cmd/desktop embeds into cmd/desktop/embedded/ (see the "Build client
-      # for desktop embed" step above).
-      - name: Build xray CLI
-        run: |
-          mkdir -p xray-dist
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-linux-amd64        github.com/xtls/xray-core/main
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-windows-amd64.exe github.com/xtls/xray-core/main
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-amd64      github.com/xtls/xray-core/main
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o xray-dist/xray-darwin-arm64      github.com/xtls/xray-core/main
-          cp xray-dist/xray-linux-amd64        cmd/desktop/embedded/linux_amd64/xray
-          cp xray-dist/xray-windows-amd64.exe  cmd/desktop/embedded/windows_amd64/xray.exe
-
-      # xray-core's `tun` inbound (used by vk-turn (tun) mode, see
-      # cmd/desktop/tun.go) needs wintun.dll next to xray.exe at runtime on
-      # Windows - it's the TUN driver, not something Go can statically link.
-      # Fetched from upstream (wintun.net) and pinned by hash rather than
-      # vendored, same reasoning as the xray CLI build above: stay off a
-      # binary blob in the repo, verify what actually ships.
-      - name: Fetch wintun.dll
-        run: |
-          mkdir -p wintun-dist
-          curl -fsSL -o /tmp/wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
-          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  /tmp/wintun.zip" | sha256sum -c -
-          unzip -p /tmp/wintun.zip wintun/bin/amd64/wintun.dll > wintun-dist/wintun.dll
-          cp wintun-dist/wintun.dll cmd/desktop/embedded/windows_amd64/wintun.dll
-
-      - name: Mark desktop-embed placeholders as intentionally overwritten
-        run: |
-          # goreleaser's release pipe aborts on a dirty git tree; these five
-          # tracked placeholders (see cmd/desktop/embedded/README.md) are
-          # *supposed* to be overwritten by the population steps above.
-          # --skip-worktree hides the local modification from `git status`
-          # without touching the working file goreleaser's `go build` reads.
-          git update-index --skip-worktree \
-            cmd/desktop/embedded/linux_amd64/client \
-            cmd/desktop/embedded/linux_amd64/xray \
-            cmd/desktop/embedded/windows_amd64/client.exe \
-            cmd/desktop/embedded/windows_amd64/xray.exe \
-            cmd/desktop/embedded/windows_amd64/wintun.dll
 
       - uses: goreleaser/goreleaser-action@v7.2.2
         with:
@@ -272,16 +55,13 @@ jobs:
           URL=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json url -q .url 2>/dev/null)
           TAG="$GITHUB_REF_NAME"
 
-          LINUX_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-linux-amd64"
-          LINUX_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-linux-arm64"
-          WIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-windows-amd64.exe"
-          DARWIN_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-darwin-arm64"
-          DARWIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-darwin-amd64"
-          DESKTOP_WIN_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-desktop-windows-amd64.exe"
-          DESKTOP_LINUX_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-desktop-linux-amd64"
+          LINUX_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-linux-amd64"
+          LINUX_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-linux-arm64"
+          WIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-windows-amd64.exe"
+          DARWIN_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-darwin-arm64"
+          DARWIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-darwin-amd64"
 
-          # GH-markdown -> Telegram-HTML: сначала экранируем HTML, потом размечаем.
-          # Хвосты "by @user in <PR-url>" из авто-нотов убираем - в посте это шум.
+          # GH-markdown -> Telegram-HTML
           HTML=$(printf '%s' "$BODY" \
             | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
             | sed -E \
@@ -291,8 +71,8 @@ jobs:
                 -e 's|`([^`]+)`|<code>\1</code>|g' \
                 -e 's|^#{1,6}[[:space:]]+(.*)$|<b>\1</b>|' \
                 -e 's|^[-*][[:space:]]+|- |')
-          TEXT=$(printf '<b>FreeTurn Proxy %s</b>\n\n%s\n\n<b>Скачать бинарники:</b>\n- Desktop: <a href="%s">Windows</a> | <a href="%s">Linux</a>\n- CLI: <a href="%s">Linux x86_64</a> | <a href="%s">arm64</a> | <a href="%s">Windows</a> | <a href="%s">macOS</a>\n\n<a href="%s">Релиз на GitHub</a>' \
-            "$TAG" "$HTML" "$DESKTOP_WIN_URL" "$DESKTOP_LINUX_URL" "$LINUX_AMD64_URL" "$LINUX_ARM64_URL" "$WIN_AMD64_URL" "$DARWIN_ARM64_URL" "$URL")
+          TEXT=$(printf '<b>FreeTurn Client %s</b>\n\n%s\n\n<b>Скачать vkturn:</b>\n- Linux: <a href="%s">x86_64</a> | <a href="%s">arm64</a>\n- Windows: <a href="%s">x86_64</a>\n- macOS: <a href="%s">Apple Silicon</a> | <a href="%s">Intel</a>\n\n<a href="%s">Релиз на GitHub</a>' \
+            "$TAG" "$HTML" "$LINUX_AMD64_URL" "$LINUX_ARM64_URL" "$WIN_AMD64_URL" "$DARWIN_ARM64_URL" "$DARWIN_AMD64_URL" "$URL")
 
           EXTRA_ARGS=()
           if [ -n "$THREAD_ID" ]; then
@@ -309,11 +89,11 @@ jobs:
               -o /dev/null
           }
 
-          send "$TEXT" HTML || send "$(printf 'FreeTurn Proxy %s\n\n%s\n\nРелиз: %s' "$TAG" "$BODY" "$URL")"
+          send "$TEXT" HTML || send "$(printf 'FreeTurn Client %s\n\n%s\n\nРелиз: %s' "$TAG" "$BODY" "$URL")"
 
-          # Также пробуем отправить ключевые бинарники прямо файлом в тему (<50MB)
+          # Отправка бинарников файлом в тему
           mkdir -p /tmp/bin-dl
-          if gh release download "$TAG" -p "client-linux-amd64" -p "client-windows-amd64.exe" -p "vkturn-desktop-windows-amd64.exe" --repo "$GITHUB_REPOSITORY" -D /tmp/bin-dl 2>/dev/null; then
+          if gh release download "$TAG" -p "vkturn-linux-amd64" -p "vkturn-windows-amd64.exe" --repo "$GITHUB_REPOSITORY" -D /tmp/bin-dl 2>/dev/null; then
             for BIN_FILE in /tmp/bin-dl/*; do
               if [ -f "$BIN_FILE" ]; then
                 DOC_EXTRA_ARGS=()
@@ -325,7 +105,7 @@ jobs:
                   -F "chat_id=${CHAT_ID}" \
                   "${DOC_EXTRA_ARGS[@]}" \
                   -F "document=@${BIN_FILE}" \
-                  -F "caption=freeturn ${TAG} (${FNAME})" \
+                  -F "caption=vkturn ${TAG} (${FNAME})" \
                   -o /dev/null || true
               fi
             done

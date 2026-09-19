@@ -8,10 +8,10 @@ before:
     - go mod download
 
 builds:
-  # Standard client/server builds — pure Go, no CGO.
-  - id: client
+  # Core VK-TURN client — pure Go, no CGO.
+  - id: vkturn
     main: ./cmd/client
-    binary: client
+    binary: vkturn
     flags:
       - -trimpath
     ldflags:
@@ -19,48 +19,17 @@ builds:
     env:
       - CGO_ENABLED=0
     targets:
-      - linux_amd64
-      - linux_arm64
-      - linux_386
-      - linux_arm_7
-      - linux_mipsle_softfloat
-      - linux_mips_softfloat
-      - linux_mips64le_softfloat
-      - linux_riscv64
       - darwin_amd64
       - darwin_arm64
-      - windows_amd64
-      - windows_arm64
-      - windows_386
-      - freebsd_amd64
-
-  - id: server
-    main: ./cmd/server
-    binary: server
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w -checklinkname=0 -X main.version={{.Version}}
-    env:
-      - CGO_ENABLED=0
-    targets:
       - linux_amd64
-      - linux_arm64
       - linux_386
+      - linux_arm64
       - linux_arm_7
-      - linux_mipsle_softfloat
-      - linux_mips_softfloat
-      - linux_mips64le_softfloat
-      - linux_riscv64
-      - darwin_amd64
-      - darwin_arm64
       - windows_amd64
-      - windows_arm64
       - windows_386
-      - freebsd_amd64
+      - windows_arm64
 
-  # Android client only. Pure Go (CGO=0), packaged as native .so name
-  # for use as Android native library (JNI / standalone shipment).
+  # Android client for Android app shipment
   - id: client-android
     main: ./cmd/client
     binary: libfreeturn.so
@@ -74,74 +43,47 @@ builds:
     targets:
       - android_arm64
 
-  # Desktop terminal client (vk-turn subprocess launcher + xray-subscription
-  # mode) — pure Go, no CGO, matches client/server's build profile.
-  - id: desktop
-    main: ./cmd/desktop
-    binary: vkturn-desktop
-    flags:
-      - -trimpath
-    # Hardcoded, not {{.Version}}: cmd/desktop versions independently of the
-    # repo's shared tag (client/server/etc still use {{.Version}}) - this is
-    # its first release, 1.0.0. Bump by hand here (and in release.yml's
-    # build-desktop-macos job) until it actually needs automated tracking -
-    # a separate release-please package is overkill for a value that hasn't
-    # changed yet.
-    ldflags:
-      - -s -w -X main.version=1.0.0
-    env:
-      - CGO_ENABLED=0
-    targets:
-      - windows_amd64
-      - linux_amd64
-    overrides:
-      # System tray (github.com/getlantern/systray) needs CGO on Linux -
-      # its AppIndicator backend. Runner needs libayatana-appindicator3-dev
-      # + libgtk-3-dev (see release.yml). Windows tray is pure WinAPI
-      # syscalls, no CGO. macOS builds separately on a macos-latest runner
-      # (Cocoa/WebKit can't cross-compile from Linux) - see build-desktop-macos
-      # job and release.extra_files below.
-      - goos: linux
-        goarch: amd64
-        env:
-          - CGO_ENABLED=1
-
 archives:
-  # Android: ship the .so binary directly (no archive wrapper), with
-  # arch suffix so arm64 and arm coexist on the release page.
+  # Android .so binary directly
   - id: android
     ids:
       - client-android
     formats: [binary]
     name_template: "libfreeturn-{{ .Version }}-android-{{ .Arch }}"
 
-  # Raw, stable-named binaries (no version in filename) so docs and scripts
-  # can fetch /releases/latest/download/<binary>-<os>-<arch> directly without
-  # unpacking a tarball. Shipped uncompressed — no tar.gz/zip archives.
+  # Raw binaries for vkturn
   - id: raw
     ids:
-      - client
-      - server
-      - desktop
+      - vkturn
     formats: [binary]
     name_template: >-
       {{ .Binary }}-{{ .Os }}-{{ .Arch }}
       {{- with .Arm }}v{{ . }}{{ end }}
-      {{- with .Mips }}-{{ . }}{{ end }}
 
-  # Android client as a raw, stable-named binary for Termux standalone use
-  # (the libfreeturn-* archive above targets Android-app native-lib shipment).
+  # Backwards compatibility names for Android build task and existing scripts
+  - id: raw-compat
+    ids:
+      - vkturn
+    formats: [binary]
+    name_template: >-
+      client-{{ .Os }}-{{ .Arch }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+
+  # Android client raw binary
   - id: raw-android
     ids:
       - client-android
     formats: [binary]
     name_template: "client-{{ .Os }}-{{ .Arch }}"
 
+  - id: raw-android-vkturn
+    ids:
+      - client-android
+    formats: [binary]
+    name_template: "vkturn-{{ .Os }}-{{ .Arch }}"
+
 checksum:
   name_template: checksums.txt
-
-sboms:
-  - artifacts: archive
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
@@ -182,41 +124,3 @@ release:
   mode: replace
   draft: false
   name_template: "{{ .ProjectName }} {{ .Version }}"
-  extra_files:
-    - glob: mobile-dist/mobile.aar
-    - glob: mobile-dist/Mobile.xcframework.zip
-    - glob: desktop-macos-dist/vkturn-desktop-darwin-amd64
-    - glob: desktop-macos-dist/vkturn-desktop-darwin-arm64
-    # goreleaser's build.main is a filesystem path (stat-checked) - it can't
-    # build an external module's package (github.com/xtls/xray-core/main),
-    # only local ./cmd/* dirs. Built as a plain `go build` step instead (see
-    # release.yml's goreleaser job, "Build xray CLI" step) and attached the
-    # same way as the mobile/macOS-desktop artifacts above. linux_amd64 and
-    # windows_amd64 aren't listed here anymore - cmd/desktop now embeds them
-    # directly (go:embed, see cmd/desktop/embed_linux.go/embed_windows.go)
-    # instead of shipping them as loose release assets; only the macOS
-    # builds (out of scope for desktop embedding) still need a standalone
-    # download.
-    - glob: xray-dist/xray-darwin-amd64
-    - glob: xray-dist/xray-darwin-arm64
-
-dockers_v2:
-  - id: server
-    ids:
-      - server
-    dockerfile: Dockerfile.goreleaser
-    images:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"
-    tags:
-      - "{{ .Version }}"
-      - '{{ if not .Prerelease }}latest{{ end }}'
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    labels:
-      org.opencontainers.image.source: "https://github.com/{{ .Env.GITHUB_REPOSITORY }}"
-      org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.revision: "{{ .FullCommit }}"
-      org.opencontainers.image.created: "{{ .Date }}"
-    extra_files:
-      - docker/entrypoint.sh
