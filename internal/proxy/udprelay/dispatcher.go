@@ -3,6 +3,8 @@ package udprelay
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +23,9 @@ import (
 // DTLSLoop, exercising dispatcher logic with no network at all.
 type slotHandle struct {
 	streamID int
-	inbound  chan *Packet  // dispatcher writes; DTLSLoop's write-goroutine reads it as its inboundChan
-	up       chan struct{} // DTLSLoop signals here on every successful handshake, including reconnects (its okchan)
+	inbound   chan *Packet  // dispatcher writes; DTLSLoop's write-goroutine reads it as its inboundChan
+	up        chan struct{} // DTLSLoop signals here on every successful handshake, including reconnects (its okchan)
+	connected atomic.Bool   // true ONLY when DTLS connection is active and ready to transmit packets!
 
 	// health - per-slot throughput+RTT signal (см. slothealth.go). Только
 	// логирование на Шаге 1 - route() его не читает.
@@ -57,8 +60,9 @@ type dispatcher struct {
 	roundRobin int // индекс для route()'s round-robin по всем слотам
 	burstCount int // число пакетов, уже отправленных в текущий слот в рамках батча
 	batchSize  int // размер батча (по умолчанию defaultBatchSize)
-	epoch      uint16
-	uplinkSeq  *atomic.Uint32
+	epoch       uint16
+	uplinkSeq   *atomic.Uint32
+	lastDropLog atomic.Int64
 }
 
 func newDispatcher() *dispatcher {
@@ -232,6 +236,19 @@ func (d *dispatcher) route(pkt *Packet) {
 	}
 	d.mu.Unlock()
 
+	var hasConnected bool
+	for _, s := range slots {
+		if s.connected.Load() {
+			hasConnected = true
+			break
+		}
+	}
+	if !hasConnected {
+		d.logDrop("все DTLS стримы отключены или переподключаются, пакеты сбрасываются")
+		packetPool.Put(pkt)
+		return
+	}
+
 	if d.uplinkSeq != nil && pkt.N > 0 && pkt.N+reseq.HeaderLen <= cap(pkt.Data) {
 		seq := d.uplinkSeq.Add(1)
 		copy(pkt.Data[reseq.HeaderLen:], pkt.Data[:pkt.N])
@@ -245,12 +262,15 @@ func (d *dispatcher) route(pkt *Packet) {
 	for i := 0; i < n; i++ {
 		idx := (startIdx + i) % n
 		target := slots[idx]
+		if !target.connected.Load() {
+			continue
+		}
 		select {
 		case target.inbound <- pkt:
 			d.mu.Lock()
 			if len(d.slots) > 0 {
 				if idx != d.roundRobin%len(d.slots) {
-					// Слот по умолчанию был занят; переносим указатель на принявший слот и начинаем новый батч
+					// Слот по умолчанию был занят или не подключён; переносим указатель на принявший слот и начинаем новый батч
 					d.roundRobin = idx % len(d.slots)
 					d.burstCount = 1
 				} else {
@@ -266,7 +286,16 @@ func (d *dispatcher) route(pkt *Packet) {
 		default:
 		}
 	}
+	d.logDrop("буферы всех активных стримов переполнены (congestion), пакет сброшен")
 	packetPool.Put(pkt)
+}
+
+func (d *dispatcher) logDrop(msg string) {
+	now := time.Now().Unix()
+	last := d.lastDropLog.Load()
+	if now != last && d.lastDropLog.CompareAndSwap(last, now) {
+		fmt.Fprintf(os.Stderr, "[VKTURN WARNING] %s (traffic drop detected)\n", msg)
+	}
 }
 
 // run - главный цикл диспетчера: единственный читатель inboundChan,

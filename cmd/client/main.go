@@ -42,7 +42,7 @@ import (
 // version is populated at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-const dtlsHandshakeConcurrency = 3
+const dtlsHandshakeConcurrency = 8
 
 func main() {
 	args := os.Args[1:]
@@ -232,7 +232,7 @@ func main() {
 		ShrinkCh:     shrinkCh,
 		AutoToggleCh: autoToggleCh,
 	}
-	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, cfg.TURN.N); err != nil {
+	if err := udprelay.Run(ctx, udpDtlsDialer, prov, logger, &connectedStreams, udpParams, peer, cfg.Proxy.Listen, totalStreams); err != nil {
 		if errors.Is(err, udprelay.ErrFatal) {
 			logger.Errorf("udprelay: fatal: %v", err)
 		} else {

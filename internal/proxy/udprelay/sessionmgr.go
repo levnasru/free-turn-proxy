@@ -105,11 +105,12 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 	slotCtx, cancel := context.WithCancel(ctx)
 	sm.cancels[streamID] = cancel
 
-	bufCap := slotInboundBufferSize
+	bufCap := 16 * defaultBatchSize
 	if sm.params != nil && sm.params.BatchSize > 0 {
-		if 4*sm.params.BatchSize > bufCap {
-			bufCap = 4 * sm.params.BatchSize
-		}
+		bufCap = 16 * sm.params.BatchSize
+	}
+	if bufCap < 128 {
+		bufCap = 128
 	}
 
 	health := newSlotHealth()
@@ -125,7 +126,7 @@ func (sm *sessionManager) launchSlot(ctx context.Context, wg *sync.WaitGroup, st
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		DTLSLoop(slotCtx, sm.deps, sm.params, sm.peer, sm.listenConn, slot.inbound, cchan, slot.up, streamID)
+		DTLSLoop(slotCtx, sm.deps, sm.params, sm.peer, sm.listenConn, slot.inbound, cchan, slot.up, streamID, &slot.connected)
 	}()
 	wg.Add(1)
 	go func() {
@@ -569,4 +570,16 @@ func (sm *sessionManager) refreshOne(ctx context.Context, wg *sync.WaitGroup) {
 	sm.mu.Lock()
 	delete(sm.groups, retireID)
 	sm.mu.Unlock()
+}
+
+// connectedCount returns how many slots currently have active DTLS connections ready to route traffic.
+func (sm *sessionManager) connectedCount() int {
+	slots := sm.disp.currentSlots()
+	count := 0
+	for _, s := range slots {
+		if s.connected.Load() {
+			count++
+		}
+	}
+	return count
 }

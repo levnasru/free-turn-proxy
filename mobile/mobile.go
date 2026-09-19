@@ -281,6 +281,7 @@ func startWithArgs(args []string, clientType string) error {
 				return
 			}
 			trafficVal.CompareAndSwap(traffic, nil)
+			activeRanker.Store(nil)
 			err := finalErr
 			if err == nil {
 				err = watchdogErr
@@ -335,7 +336,6 @@ func startWithArgs(args []string, clientType string) error {
 		}
 		ranker := stunprobe.NewRanker(stunprobe.Config{Log: logger})
 		activeRanker.Store(ranker)
-		defer activeRanker.CompareAndSwap(ranker, nil)
 		getCreds = ranker.WrapGetCreds(getCreds)
 
 		providerCount := len(cfg.VK.Links)

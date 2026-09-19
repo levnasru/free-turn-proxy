@@ -69,7 +69,7 @@ func TestBuildVKTurnBridgeConfigLogLevel(t *testing.T) {
 	}
 
 	debugMode = false
-	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig()), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig(nil, nil)), &cfg); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 	if cfg.Log.LogLevel != "warning" {
@@ -77,12 +77,13 @@ func TestBuildVKTurnBridgeConfigLogLevel(t *testing.T) {
 	}
 
 	debugMode = true
-	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig()), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(buildVKTurnBridgeConfig(nil, nil)), &cfg); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 	if cfg.Log.LogLevel != "debug" {
 		t.Fatalf("expected debug loglevel under debugMode, got %q", cfg.Log.LogLevel)
 	}
+
 }
 
 func TestBuildClientArgsMultipleHubURLs(t *testing.T) {
@@ -149,7 +150,9 @@ func TestDecodeSubscriptionBodyPlainTextPassthrough(t *testing.T) {
 }
 
 func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
-	raw := buildVKTurnBridgeConfig()
+	bypassDomains := []string{"domain:kinopoisk.ru"}
+	bypassIPs := []string{"1.2.3.4/32"}
+	raw := buildVKTurnBridgeConfig(bypassDomains, bypassIPs)
 
 	var cfg struct {
 		Inbounds []struct {
@@ -157,6 +160,7 @@ func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
 			Port     int    `json:"port"`
 		} `json:"inbounds"`
 		Outbounds []struct {
+			Tag      string `json:"tag"`
 			Protocol string `json:"protocol"`
 			Settings struct {
 				Vnext []struct {
@@ -168,6 +172,13 @@ func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
 				} `json:"vnext"`
 			} `json:"settings"`
 		} `json:"outbounds"`
+		Routing struct {
+			Rules []struct {
+				OutboundTag string   `json:"outboundTag"`
+				Domain      []string `json:"domain"`
+				IP          []string `json:"ip"`
+			} `json:"rules"`
+		} `json:"routing"`
 	}
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatalf("buildVKTurnBridgeConfig produced invalid JSON: %v\n%s", err, raw)
@@ -176,7 +187,7 @@ func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
 	if len(cfg.Inbounds) != 1 || cfg.Inbounds[0].Protocol != "socks" || cfg.Inbounds[0].Port != vkTurnLocalSocksPort {
 		t.Fatalf("unexpected inbounds: %+v", cfg.Inbounds)
 	}
-	if len(cfg.Outbounds) != 1 || cfg.Outbounds[0].Protocol != "vless" {
+	if len(cfg.Outbounds) != 2 || cfg.Outbounds[0].Protocol != "vless" || cfg.Outbounds[1].Protocol != "freedom" {
 		t.Fatalf("unexpected outbounds: %+v", cfg.Outbounds)
 	}
 	vnext := cfg.Outbounds[0].Settings.Vnext
@@ -186,7 +197,11 @@ func TestBuildVKTurnBridgeConfigParsesAndMatchesKit(t *testing.T) {
 	if len(vnext[0].Users) != 1 || vnext[0].Users[0].ID != vkTurnBridgeUUID {
 		t.Fatalf("unexpected users: %+v", vnext[0].Users)
 	}
+	if len(cfg.Routing.Rules) < 2 {
+		t.Fatalf("expected routing rules, got %+v", cfg.Routing.Rules)
+	}
 }
+
 
 func TestWaitForListeningSucceedsOnceAccepting(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -235,7 +250,9 @@ func TestWaitForListeningRespectsContextCancellation(t *testing.T) {
 
 func TestBuildVKTurnTunConfig(t *testing.T) {
 	routes := []string{"8.0.0.0/7", "11.0.0.0/8"}
-	raw, err := buildVKTurnTunConfig("eth0", routes)
+	bypassDomains := []string{"domain:kinopoisk.ru"}
+	bypassIPs := []string{"1.2.3.4/32"}
+	raw, err := buildVKTurnTunConfig("eth0", routes, bypassDomains, bypassIPs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,6 +267,7 @@ func TestBuildVKTurnTunConfig(t *testing.T) {
 			} `json:"settings"`
 		} `json:"inbounds"`
 		Outbounds []struct {
+			Tag      string `json:"tag"`
 			Protocol string `json:"protocol"`
 			Settings struct {
 				Vnext []struct {
@@ -259,6 +277,13 @@ func TestBuildVKTurnTunConfig(t *testing.T) {
 				} `json:"vnext"`
 			} `json:"settings"`
 		} `json:"outbounds"`
+		Routing struct {
+			Rules []struct {
+				OutboundTag string   `json:"outboundTag"`
+				Domain      []string `json:"domain"`
+				IP          []string `json:"ip"`
+			} `json:"rules"`
+		} `json:"routing"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		t.Fatalf("buildVKTurnTunConfig produced invalid JSON: %v\n%s", err, raw)
@@ -278,12 +303,15 @@ func TestBuildVKTurnTunConfig(t *testing.T) {
 		t.Errorf("autoSystemRoutingTable = %v, want %v", in.AutoSystemRoutingTable, routes)
 	}
 
-	if len(parsed.Outbounds) != 1 || parsed.Outbounds[0].Protocol != "vless" {
-		t.Fatalf("expected exactly one vless outbound, got %+v", parsed.Outbounds)
+	if len(parsed.Outbounds) != 2 || parsed.Outbounds[0].Protocol != "vless" || parsed.Outbounds[1].Protocol != "freedom" {
+		t.Fatalf("expected vless and freedom outbounds, got %+v", parsed.Outbounds)
 	}
 	gotUUID := parsed.Outbounds[0].Settings.Vnext[0].Users[0].ID
 	if gotUUID != vkTurnBridgeUUID {
-		t.Errorf("vless user id = %q, want vkTurnBridgeUUID (%q)", gotUUID, vkTurnBridgeUUID)
+		t.Errorf("UUID = %q, want %q", gotUUID, vkTurnBridgeUUID)
+	}
+	if len(parsed.Routing.Rules) < 2 {
+		t.Fatalf("expected routing rules, got %+v", parsed.Routing.Rules)
 	}
 }
 

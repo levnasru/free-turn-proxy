@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/samosvalishe/free-turn-proxy/internal/transport/stunprobe"
 )
 
 func TestClientArgsFreeturnURIIsPositional(t *testing.T) {
@@ -50,4 +52,15 @@ func TestStartFlagsManualCaptchaRequiresPresenter(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires presenter") {
 		t.Fatalf("StartFlags() error = %v", err)
 	}
+}
+
+func TestInvalidateProbes(t *testing.T) {
+	// Calling InvalidateProbes when idle must not panic
+	InvalidateProbes()
+
+	// Setting a mock/real ranker in activeRanker and calling InvalidateProbes
+	r := stunprobe.NewRanker(stunprobe.Config{})
+	activeRanker.Store(r)
+	InvalidateProbes()
+	activeRanker.Store(nil)
 }

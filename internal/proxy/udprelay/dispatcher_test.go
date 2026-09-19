@@ -7,11 +7,13 @@ import (
 )
 
 func newTestSlot(streamID int) *slotHandle {
-	return &slotHandle{
+	slot := &slotHandle{
 		streamID: streamID,
 		inbound:  make(chan *Packet, slotInboundBufferSize),
 		up:       make(chan struct{}, 1),
 	}
+	slot.connected.Store(true)
+	return slot
 }
 
 func TestDispatcherRoutesRoundRobin(t *testing.T) {
@@ -296,5 +298,29 @@ func TestDispatcherSkipsFullSlotRoundRobin(t *testing.T) {
 	received := <-s2.inbound
 	if string(received.Data[:received.N]) != "hello" {
 		t.Fatalf("expected 'hello', got %s", string(received.Data[:received.N]))
+	}
+}
+
+func TestDispatcherSkipsDisconnectedSlot(t *testing.T) {
+	t.Parallel()
+	d := newDispatcher()
+	s1, s2 := newTestSlot(1), newTestSlot(2)
+	s1.connected.Store(false) // s1 is disconnected / reconnecting
+	d.setSlots([]*slotHandle{s1, s2}, 1)
+
+	// Round-robin pointer starts at s1, but s1 is disconnected.
+	// Dispatcher must skip s1 and route directly to connected s2.
+	pkt := &Packet{Data: []byte("active"), N: 6}
+	d.route(pkt)
+
+	if len(s1.inbound) != 0 {
+		t.Fatalf("expected 0 packets in disconnected s1, got %d", len(s1.inbound))
+	}
+	if len(s2.inbound) != 1 {
+		t.Fatalf("expected packet routed to connected s2, got %d in s2", len(s2.inbound))
+	}
+	recv := <-s2.inbound
+	if string(recv.Data[:recv.N]) != "active" {
+		t.Fatalf("expected 'active', got %s", string(recv.Data[:recv.N]))
 	}
 }

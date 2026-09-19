@@ -42,3 +42,8 @@ GEMINI.md
 
 # секреты харвестера (VK session state, TURN-креды) — никогда не коммитить
 /vps_via_key_test/
+
+# локальные замеры и сессии
+docs/*.txt
+*.session
+gradient-log.csv

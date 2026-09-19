@@ -13,17 +13,18 @@ const (
 
 	// DefaultDwellTimeout is the maximum time to hold subsequent packets
 	// waiting for a missing sequence hole before advancing the read head.
-	// 25ms cleanly absorbs cellular LTE radio scheduling jitter and inter-relay variance
+	// 35ms cleanly absorbs cellular LTE radio scheduling jitter and inter-relay variance
 	// without introducing HOL blocking penalties on normal packet loss. Any packet
 	// arriving after the dwell timeout is still delivered directly to onOrdered so that
 	// WireGuard / TCP receive it without loss.
-	DefaultDwellTimeout = 25 * time.Millisecond
+	DefaultDwellTimeout = 35 * time.Millisecond
 )
 
 type slot struct {
-	occupied bool
-	seq      uint32
-	payload  []byte
+	occupied   bool
+	seq        uint32
+	payload    []byte
+	receivedAt time.Time
 }
 
 // Stats captures resequencing counters for observability.
@@ -101,7 +102,7 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 
 	if !r.initialized {
 		r.initialized = true
-		r.baseSeq = seq
+		r.baseSeq = 1
 	}
 
 	diff := int32(seq - r.baseSeq)
@@ -149,6 +150,7 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 		s.occupied = true
 		s.seq = seq
 		s.payload = append(s.payload[:0], payload...)
+		s.receivedAt = time.Now()
 	}
 
 	if diff == 0 {
@@ -157,7 +159,7 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 	} else {
 		// Out of order packet arrived, creating or widening a gap at baseSeq.
 		if r.gapDeadline.IsZero() {
-			r.gapDeadline = time.Now().Add(r.dwellTimeout)
+			r.gapDeadline = s.receivedAt.Add(r.dwellTimeout)
 		}
 	}
 }
@@ -175,6 +177,7 @@ func (r *Resequencer) drainContiguousLocked() {
 		r.onOrdered(s.payload)
 		r.stats.Delivered++
 		s.occupied = false
+		s.receivedAt = time.Time{}
 		r.pendingCount--
 		r.baseSeq++
 	}
@@ -182,7 +185,12 @@ func (r *Resequencer) drainContiguousLocked() {
 	// Check if there are remaining gaps
 	if r.pendingCount > 0 {
 		if r.gapDeadline.IsZero() {
-			r.gapDeadline = time.Now().Add(r.dwellTimeout)
+			earliest := r.earliestPendingReceivedLocked()
+			if !earliest.IsZero() {
+				r.gapDeadline = earliest.Add(r.dwellTimeout)
+			} else {
+				r.gapDeadline = time.Now().Add(r.dwellTimeout)
+			}
 		}
 	} else {
 		r.gapDeadline = time.Time{}
@@ -193,35 +201,58 @@ func (r *Resequencer) hasPendingSlotsLocked() bool {
 	return r.pendingCount > 0
 }
 
+func (r *Resequencer) earliestPendingReceivedLocked() time.Time {
+	var earliest time.Time
+	found := 0
+	for i := 0; i < WindowSize && found < r.pendingCount; i++ {
+		idx := (r.baseSeq + uint32(i)) & windowMask
+		s := &r.slots[idx]
+		if s.occupied {
+			if earliest.IsZero() || s.receivedAt.Before(earliest) {
+				earliest = s.receivedAt
+			}
+			found++
+		}
+	}
+	return earliest
+}
+
 func (r *Resequencer) checkTimeout(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.gapDeadline.IsZero() || now.Before(r.gapDeadline) {
-		return
-	}
-
-	// Gap dwell timeout expired: skip the missing gap and advance baseSeq
-	// to the next occupied slot in the window to unblock HOL stall in one shot.
-	found := false
-	for i := 0; i < WindowSize; i++ {
-		idx := r.baseSeq & windowMask
-		if r.slots[idx].occupied && r.slots[idx].seq == r.baseSeq {
-			found = true
-			break
+	for r.pendingCount > 0 {
+		if r.gapDeadline.IsZero() || now.Before(r.gapDeadline) {
+			return
 		}
-		r.timedOut[idx] = r.baseSeq
-		r.stats.GapsTimedOut++
-		r.baseSeq++
-	}
 
-	if found {
-		r.drainContiguousLocked()
-	}
-	if r.pendingCount > 0 {
-		r.gapDeadline = time.Now().Add(r.dwellTimeout)
-	} else {
-		r.gapDeadline = time.Time{}
+		// Gap dwell timeout expired: skip the missing gap and advance baseSeq
+		// to the next occupied slot in the window to unblock HOL stall in one shot.
+		found := false
+		for i := 0; i < WindowSize; i++ {
+			idx := r.baseSeq & windowMask
+			if r.slots[idx].occupied && r.slots[idx].seq == r.baseSeq {
+				found = true
+				break
+			}
+			r.timedOut[idx] = r.baseSeq
+			r.stats.GapsTimedOut++
+			r.baseSeq++
+		}
+
+		if found {
+			r.drainContiguousLocked()
+		}
+		if r.pendingCount > 0 {
+			earliest := r.earliestPendingReceivedLocked()
+			if !earliest.IsZero() {
+				r.gapDeadline = earliest.Add(r.dwellTimeout)
+			} else {
+				r.gapDeadline = now.Add(r.dwellTimeout)
+			}
+		} else {
+			r.gapDeadline = time.Time{}
+		}
 	}
 }
 
@@ -235,6 +266,7 @@ func (r *Resequencer) Stats() Stats {
 func (r *Resequencer) drainAllLocked() {
 	for i := range r.slots {
 		r.slots[i].occupied = false
+		r.slots[i].receivedAt = time.Time{}
 		r.timedOut[i] = 0
 	}
 	r.pendingCount = 0
@@ -256,7 +288,7 @@ func (r *Resequencer) Close() {
 	}
 }
 
-// Reset clears all buffered packets and resets the resequencer to initial state at seq=1.
+// Reset clears all buffered packets and resets the resequencer to wait for the next sequence.
 func (r *Resequencer) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -267,6 +299,7 @@ func (r *Resequencer) Reset() {
 	for i := range r.slots {
 		r.slots[i].occupied = false
 		r.slots[i].payload = r.slots[i].payload[:0]
+		r.slots[i].receivedAt = time.Time{}
 		r.timedOut[i] = 0
 	}
 }

@@ -16,14 +16,21 @@ import (
 // an error so the caller can exit cleanly instead of looping forever.
 func selectFromKeys(items []string, keys io.Reader, out io.Writer) (int, error) {
 	sel := 0
+	firstRender := true
 	render := func() {
-		fmt.Fprint(out, "\r\n")
+		if !firstRender {
+			// Move cursor up to overwrite previous menu lines
+			fmt.Fprintf(out, "\x1b[%dA\r", len(items))
+		} else {
+			fmt.Fprint(out, "\r\n")
+			firstRender = false
+		}
 		for i, it := range items {
 			marker := "  "
 			if i == sel {
 				marker = "> "
 			}
-			fmt.Fprintf(out, "%s%s\r\n", marker, it)
+			fmt.Fprintf(out, "\x1b[2K%s%s\r\n", marker, it)
 		}
 	}
 	render()
@@ -43,15 +50,18 @@ func selectFromKeys(items []string, keys io.Reader, out io.Writer) (int, error) 
 			return 0, errors.New("selectFromKeys: interrupted")
 		case n == 1 && (chunk[0] == '\r' || chunk[0] == '\n'):
 			return sel, nil
-		case n == 3 && chunk[0] == 0x1b && chunk[1] == '[' && chunk[2] == 'A': // up
+		case (n == 3 && chunk[0] == 0x1b && (chunk[1] == '[' || chunk[1] == 'O') && chunk[2] == 'A') || (n == 1 && (chunk[0] == 'k' || chunk[0] == 'K')): // up
 			sel = (sel - 1 + len(items)) % len(items)
 			render()
-		case n == 3 && chunk[0] == 0x1b && chunk[1] == '[' && chunk[2] == 'B': // down
+		case (n == 3 && chunk[0] == 0x1b && (chunk[1] == '[' || chunk[1] == 'O') && chunk[2] == 'B') || (n == 1 && (chunk[0] == 'j' || chunk[0] == 'J')): // down
 			sel = (sel + 1) % len(items)
 			render()
+		case n == 1 && chunk[0] >= '1' && int(chunk[0]-'1') < len(items):
+			return int(chunk[0] - '1'), nil
 		}
 	}
 }
+
 
 // RunMenu puts stdin into raw mode, runs selectFromKeys against it, restores
 // the terminal, and returns the selected item text (not just its index — the

@@ -287,3 +287,41 @@ func TestResequencerStats(t *testing.T) {
 		t.Errorf("expected delivered [1, 3, 2], got %v", delivered)
 	}
 }
+
+func TestResequencerDwellNoIndefiniteAccumulation(t *testing.T) {
+	var delivered []int
+	var mu sync.Mutex
+	// 20ms dwell timeout
+	r := New(20*time.Millisecond, func(payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, int(payload[0]))
+	})
+	defer r.Close()
+
+	// In-order packet 1
+	r.Push(1, []byte{1})
+
+	// Burst out-of-order packets arriving together: 4 and 7 (gaps at 2, 3 and 5, 6)
+	r.Push(4, []byte{4})
+	r.Push(7, []byte{7})
+
+	mu.Lock()
+	if len(delivered) != 1 || delivered[0] != 1 {
+		t.Fatalf("expected only packet 1 delivered initially, got %v", delivered)
+	}
+	mu.Unlock()
+
+	// Wait 35ms (> 20ms dwell, but < 40ms double-dwell)
+	time.Sleep(35 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Both 4 and 7 should be delivered without waiting for a second 20ms dwell period!
+	if len(delivered) != 3 {
+		t.Fatalf("expected 3 delivered (1, 4, 7), got %d (%v)", len(delivered), delivered)
+	}
+	if delivered[1] != 4 || delivered[2] != 7 {
+		t.Errorf("expected [1, 4, 7], got %v", delivered)
+	}
+}

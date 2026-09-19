@@ -1,62 +1,112 @@
+//go:build windows || (darwin && cgo) || (linux && cgo && appindicator)
+
 // cmd/desktop/tray.go
 package main
 
 import (
 	"context"
+	"os"
+	"sync"
 
 	"github.com/getlantern/systray"
 )
 
-// startTray shows a tray icon summarizing statusLabel, wired to the same
-// cancel() that Ctrl+C/SIGTERM already stop the tunnel with — "Отключить"/
-// "Выход" in the tray are just another way into the exact same shutdown
-// path, not a separate one. No-op if trayAvailable() says there's nowhere
-// to show it (e.g. a headless Linux SSH session) — the plain
-// terminal/Ctrl+C flow keeps working untouched either way.
-//
-// On Windows this also hides the console window once the tray is up (see
-// tray_windows.go) so a connected tunnel doesn't leave a console sitting in
-// front of the user; "Развернуть" restores it. Linux/macOS get the
-// identical menu through the same systray library (AppIndicator/GTK,
-// Cocoa) but keep the terminal visible — a console process here doesn't
-// own the terminal emulator's window, so there is nothing to hide.
+var (
+	trayOnce          sync.Once
+	trayMu            sync.Mutex
+	trayCurrentCancel context.CancelFunc
+	mStatusItem       *systray.MenuItem
+	mStopItem         *systray.MenuItem
+)
+
+// startTray initializes or updates the persistent tray icon.
+// getlantern/systray is not re-entrant, so systray.Run is called exactly once.
+// Subsequent calls update the status label and wire cancel() to the active mode.
 func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel string) {
 	if !trayAvailable() {
 		return
 	}
-	go systray.Run(func() {
-		systray.SetTitle("VK-TURN")
-		systray.SetTooltip("VK-TURN: " + statusLabel)
 
-		mStatus := systray.AddMenuItem(statusLabel, "")
-		mStatus.Disable()
-		systray.AddSeparator()
-		mRestore := restoreMenuItem() // nil where there's nothing to restore
-		mStop := systray.AddMenuItem("Отключить", "Остановить туннель")
-		mQuit := systray.AddMenuItem("Выход", "Закрыть VK-TURN")
+	trayMu.Lock()
+	trayCurrentCancel = cancel
+	trayMu.Unlock()
 
-		hideConsoleOnConnect()
+	trayOnce.Do(func() {
+		go systray.Run(func() {
+			systray.SetTitle("VK-TURN")
+			systray.SetTooltip("VK-TURN: " + statusLabel)
 
-		go func() {
-			var restoreCh chan struct{}
-			if mRestore != nil {
-				restoreCh = mRestore.ClickedCh
-			}
-			for {
-				select {
-				case <-restoreCh:
-					restoreConsole()
-				case <-mStop.ClickedCh:
-					cancel()
-				case <-mQuit.ClickedCh:
-					cancel()
-				case <-ctx.Done():
-					systray.Quit()
-					return
+			mStatusItem = systray.AddMenuItem(statusLabel, "")
+			mStatusItem.Disable()
+			systray.AddSeparator()
+			mRestore := restoreMenuItem() // nil on non-Windows
+			mBypass := systray.AddMenuItem("Сайты мимо туннеля (Whitelist)...", "Редактировать список доменов и IP для прямого доступа")
+			mStopItem = systray.AddMenuItem("Отключить", "Остановить туннель")
+			mQuit := systray.AddMenuItem("Выход", "Закрыть VK-TURN")
+
+			hideConsoleOnConnect()
+
+			go func() {
+				var restoreCh chan struct{}
+				if mRestore != nil {
+					restoreCh = mRestore.ClickedCh
 				}
-			}
-		}()
-	}, func() {
-		restoreConsole()
+				for {
+					select {
+					case <-restoreCh:
+						restoreConsole()
+					case <-mBypass.ClickedCh:
+						if p, err := bypassFilePath(); err == nil {
+							_ = openInSystemEditor(p)
+						}
+					case <-mStopItem.ClickedCh:
+						trayMu.Lock()
+						c := trayCurrentCancel
+						trayMu.Unlock()
+						if c != nil {
+							c()
+						}
+					case <-mQuit.ClickedCh:
+						trayMu.Lock()
+						c := trayCurrentCancel
+						trayMu.Unlock()
+						if c != nil {
+							c()
+						}
+						restoreConsole()
+						os.Exit(0)
+					}
+				}
+			}()
+		}, func() {
+			restoreConsole()
+		})
 	})
+
+	// If tray is already running, update status and hide console if needed
+	trayMu.Lock()
+	if mStatusItem != nil {
+		mStatusItem.SetTitle(statusLabel)
+		systray.SetTooltip("VK-TURN: " + statusLabel)
+	}
+	if mStopItem != nil {
+		mStopItem.Enable()
+	}
+	trayMu.Unlock()
+	hideConsoleOnConnect()
+
+	// Monitor context cancellation to update tray state without killing systray
+	go func() {
+		<-ctx.Done()
+		trayMu.Lock()
+		if mStatusItem != nil {
+			mStatusItem.SetTitle("Отключено")
+			systray.SetTooltip("VK-TURN: Отключено")
+		}
+		if mStopItem != nil {
+			mStopItem.Disable()
+		}
+		trayMu.Unlock()
+		restoreConsole()
+	}()
 }

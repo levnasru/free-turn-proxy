@@ -440,27 +440,13 @@ func (s *clientSession) route(data []byte) {
 
 	curEpoch := s.currentEpoch
 	candidates := make([]*streamSlot, 0, n)
-	if curEpoch != 0 {
-		for _, sl := range s.slots {
-			select {
-			case <-sl.done:
-				continue
-			default:
-				if sl.epoch == curEpoch {
-					candidates = append(candidates, sl)
-				}
-			}
-		}
-	}
-	if len(candidates) == 0 {
-		for _, sl := range s.slots {
-			select {
-			case <-sl.done:
-				continue
-			default:
-				if sl.epoch == 0 || sl.epoch == curEpoch {
-					candidates = append(candidates, sl)
-				}
+	for _, sl := range s.slots {
+		select {
+		case <-sl.done:
+			continue
+		default:
+			if curEpoch == 0 || sl.epoch == curEpoch || sl.epoch == 0 {
+				candidates = append(candidates, sl)
 			}
 		}
 	}

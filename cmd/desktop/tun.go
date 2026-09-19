@@ -17,9 +17,12 @@ import (
 // SOCKS5 bridge with a system-wide TUN interface: once this reaches the
 // "Подключено" state, the OS itself routes all traffic (minus the LAN
 // exclusion list from lanexclude.go) through xray — no per-app proxy
-// configuration needed. Requires admin/root, requested here (not earlier)
-// so picking any other menu item never triggers a UAC/pkexec prompt.
-func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig) {
+// configuration needed. Supports both "wg" (WireGuard UDP) and "xray" (VLESS TCP).
+func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopConfig, tunType string) {
+	if tunType == "" {
+		tunType = "wg"
+	}
+
 	if err := checkEnvironment(true, []int{vkTurnClientListenPort}); err != nil {
 		fmt.Fprintln(os.Stderr, "Ошибка запуска:", err)
 		return
@@ -35,24 +38,47 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 			fmt.Fprintln(os.Stderr, "Не удалось получить права администратора/root даже после запроса — прекращаю попытки.")
 			return
 		}
-		fmt.Println("Режиму 'vk-turn (tun)' нужны права администратора/root — запрашиваю...")
-		if err := relaunchElevated([]string{"-tun-elevated"}); err != nil {
+		modeLabel := "vk-turn (wg tun)"
+		if tunType == "xray" {
+			modeLabel = "vk-turn (xray tun)"
+		}
+		fmt.Printf("Режиму '%s' нужны права администратора/root — запрашиваю...\n", modeLabel)
+		if err := relaunchElevated([]string{"-tun-elevated", "-tun-mode=" + tunType}); err != nil {
 			fmt.Fprintln(os.Stderr, "Не удалось получить права:", err)
 			return
 		}
 		if runtime.GOOS == "windows" {
-			// Windows: relaunchElevated returns as soon as the elevated
-			// process is launched (fire-and-forget) — it's now running
-			// independently in its own console. Falling back to this
-			// process's menu would let the user start a second, conflicting
-			// session (e.g. vk-turn (socks)) fighting the elevated instance
-			// for 127.0.0.1:9000. Exit entirely instead.
 			fmt.Println("Запущен отдельный процесс с правами администратора.")
 			os.Exit(0)
 		}
-		// Linux: relaunchElevated already blocked until the elevated child
-		// finished — nothing left to do, return to the menu normally.
 		return
+	}
+
+	var wgParsed *WGConfigParsed
+	if tunType == "wg" {
+		if cfg.WgConfig == "" {
+			if sess, serr := LoadSession(); serr == nil && sess.Token != "" {
+				syncCtx, syncCancel := context.WithTimeout(ctx, 5*time.Second)
+				if fresh, ferr := FetchConfig(syncCtx, sess.BaseURL, sess.Token); ferr == nil && fresh != nil && fresh.WgConfig != "" {
+					cfg.WgConfig = fresh.WgConfig
+					cfg.WgPeer = fresh.Peer
+					_ = SaveCache(cfg)
+				}
+				syncCancel()
+			}
+		}
+		if cfg.WgConfig == "" {
+			fmt.Fprintln(os.Stderr, "WireGuard-конфиг не найден на портале для этого пользователя. Переключаюсь на xray tun...")
+			tunType = "xray"
+		} else {
+			parsed, perr := parseWGConfig(cfg.WgConfig)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "Ошибка WireGuard-конфига: %v. Переключаюсь на xray tun...\n", perr)
+				tunType = "xray"
+			} else {
+				wgParsed = parsed
+			}
+		}
 	}
 
 	iface, err := defaultRouteInterface()
@@ -60,16 +86,17 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 		fmt.Fprintln(os.Stderr, "Не удалось определить сетевой интерфейс:", err)
 		return
 	}
-	routes := publicRoutes()
+	bypassDomains, bypassIPs := collectBypassRules(cfg)
+	if tunType == "wg" {
+		if domainIPs := resolveBypassDomainsToIPs(bypassDomains); len(domainIPs) > 0 {
+			bypassIPs = append(bypassIPs, domainIPs...)
+		}
+	}
+	routes := publicRoutesWithExclusions(bypassIPs)
 
 	clientBin, err := resolveClientBin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не найден client:", err)
-		return
-	}
-	xrayBin, err := resolveXrayBin()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
 		return
 	}
 
@@ -81,24 +108,72 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 	defer closeOutputs()
 
 	clientDone := make(chan error, 1)
-	go func() { clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
-
-	fmt.Println("Поднимаю туннель VK-TURN...")
 	const clientListenTimeout = 60 * time.Second
+
+	if tunType == "wg" {
+		go func() { clientDone <- RunClientWG(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
+		fmt.Println("Поднимаю нативный WireGuard туннель VK-TURN (UDP)...")
+		if err := waitForVKTurnUDPReady(ctx, vkTurnClientListenPort, clientListenTimeout); err != nil {
+			fmt.Fprintln(os.Stderr, "Туннель VK-TURN не поднялся:", err)
+			cancel()
+			<-clientDone
+			return
+		}
+
+		stopWG, err := startNativeWGTunnel(ctx, wgParsed, routes, iface)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Не удалось поднять интерфейс WireGuard:", err)
+			cancel()
+			<-clientDone
+			return
+		}
+		defer stopWG()
+
+		checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+		ip, err := checkDirectConnectivity(checkCtx)
+		checkCancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Не удалось проверить соединение (туннель может не работать):", err)
+		} else {
+			fmt.Println("Подключено, выходной IP:", ip)
+		}
+		fmt.Printf("Весь трафик машины теперь идёт через нативный WireGuard туннель (исключено доменов: %d, IP/подсетей: %d). Ctrl+C — остановить.\n", len(bypassDomains), len(bypassIPs))
+
+		startTray(ctx, cancel, "Подключено (wg tun)")
+		defer restoreConsole()
+
+		select {
+		case err := <-clientDone:
+			reportModeExit(ctx, "client", err)
+			cancel()
+		case <-ctx.Done():
+			reportModeExit(ctx, "client", nil)
+		}
+		return
+	}
+
+	xrayBin, err := resolveXrayBin()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Не найден xray:", err)
+		return
+	}
+
+	go func() { clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
+	fmt.Println("Поднимаю Xray туннель VK-TURN (TCP)...")
 	if err := waitForListening(ctx, fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort), clientListenTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, "Туннель не поднялся:", err)
 		cancel()
 		<-clientDone
 		return
 	}
-
-	tunConfig, err := buildVKTurnTunConfig(iface, routes)
+	tc, err := buildVKTurnTunConfig(iface, routes, bypassDomains, bypassIPs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Не удалось собрать конфиг tun:", err)
 		cancel()
 		<-clientDone
 		return
 	}
+	tunConfig := tc
 
 	xrayDone := make(chan error, 1)
 	go func() { xrayDone <- RunXray(ctx, xrayBin, tunConfig, stdout, stderr) }()
@@ -114,7 +189,9 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 		<-clientDone
 		return
 	case <-ctx.Done():
+		cancel()
 		<-clientDone
+		<-xrayDone
 		return
 	}
 
@@ -126,9 +203,9 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 	} else {
 		fmt.Println("Подключено, выходной IP:", ip)
 	}
-	fmt.Println("Весь трафик машины теперь идёт через туннель. Ctrl+C — остановить.")
+	fmt.Printf("Весь трафик машины теперь идёт через туннель (исключено доменов: %d, IP/подсетей: %d). Ctrl+C — остановить.\n", len(bypassDomains), len(bypassIPs))
 
-	startTray(ctx, cancel, "Подключено (tun)")
+	startTray(ctx, cancel, "Подключено (xray tun)")
 	defer restoreConsole()
 
 	select {
@@ -141,6 +218,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 		cancel()
 		<-clientDone
 	}
+
 }
 
 // checkDirectConnectivity is checkVKTurnConnectivity's tun-mode counterpart:

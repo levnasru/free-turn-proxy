@@ -76,6 +76,10 @@ type Params struct {
 	// продолжает считать и логировать решения, но не применяет их. nil -
 	// тумблера нет, автоскейлер работает.
 	AutoToggleCh <-chan struct{}
+
+	// ResetReseqCh, если задан, принудительно сбрасывает downlink resequencer
+	// при получении сигнала (например, при ротации или рестарте серверной сессии).
+	ResetReseqCh <-chan struct{}
 }
 
 // streamStartBarrier - максимум, который стримы 2..N ждут прогрева кэша
@@ -99,6 +103,7 @@ type Deps struct {
 	ActiveLocalPeer  *atomic.Value
 	ConnectedStreams *atomic.Int32
 	DownlinkReseq    *reseq.Resequencer
+	DownlinkEpoch    *atomic.Uint32
 	UplinkSeq        *atomic.Uint32
 	// fatalCh - внутренний сигнальный канал; устанавливается Run, пишется
 	// TURNLoop, читается Run для проброса фатальной ошибки наверх.
@@ -138,6 +143,7 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 	fatalCh := make(chan error, 1)
 	var activeLocalPeer atomic.Value
 	var uplinkSeq atomic.Uint32
+	var downlinkEpoch atomic.Uint32
 
 	downlinkReseq := reseq.New(reseq.DefaultDwellTimeout, func(payload []byte) {
 		if peerAddr := activeLocalPeer.Load(); peerAddr != nil {
@@ -159,6 +165,7 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 		ActiveLocalPeer:  &activeLocalPeer,
 		ConnectedStreams: connectedStreams,
 		DownlinkReseq:    downlinkReseq,
+		DownlinkEpoch:    &downlinkEpoch,
 		UplinkSeq:        &uplinkSeq,
 		fatalCh:          fatalCh,
 	}
@@ -179,18 +186,74 @@ func Run(ctx context.Context, dtlsDialer *dtlsdial.Dialer, auth AuthHandler, log
 		sm.run(runCtx, inboundChan, params.RotateCh, params.GrowCh, params.ShrinkCh, params.AutoToggleCh)
 	})
 
+	if params != nil && params.ResetReseqCh != nil {
+		wg.Go(func() {
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-params.ResetReseqCh:
+					downlinkReseq.Reset()
+				}
+			}
+		})
+	}
+
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		tickInterval := 2 * time.Second
+		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
+
+		var prevTx, prevRx uint64
+		if params != nil && params.TrafficStats != nil {
+			prevTx, prevRx = params.TrafficStats.Counters()
+		}
+		var stallDuration time.Duration
+		isStalled := false
+
 		for {
 			select {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
+				connCount := sm.connectedCount()
+				totalSlots := len(sm.disp.currentSlots())
 				st := downlinkReseq.Stats()
-				if st.Pushed > 0 {
-					logger.Debugf("[Reseq Downlink] pushed=%d delivered=%d lateDelivered=%d gapsTimedOut=%d overrun=%d",
-						st.Pushed, st.Delivered, st.LateDelivered, st.GapsTimedOut, st.WindowOverrun)
+
+				var txDelta, rxDelta uint64
+				if params != nil && params.TrafficStats != nil {
+					curTx, curRx := params.TrafficStats.Counters()
+					txDelta = curTx - prevTx
+					rxDelta = curRx - prevRx
+					prevTx, prevRx = curTx, curRx
+				}
+
+				// Зависание: активная отправка данных (txDelta > 2KB), но сервер не отвечает (rxDelta == 0) в течение >= 3 секунд
+				if txDelta > 2000 && rxDelta == 0 {
+					stallDuration += tickInterval
+					if stallDuration >= 3*time.Second {
+						isStalled = true
+						logger.Warnf("[STALL DETECTED] ⚠️ Зависание трафика %.1fs! Отправка: %s, приём с сервера: 0 Б/с (активно стримов: %d/%d, reseq дыр: %d, опоздавших: %d)",
+							stallDuration.Seconds(),
+							stats.FormatBitsPerSecond(txDelta, tickInterval),
+							connCount, totalSlots, st.GapsTimedOut, st.LateDelivered)
+					}
+				} else {
+					if isStalled && rxDelta > 0 {
+						logger.Infof("[STALL RESOLVED] ✅ Связь восстановилась после зависания на %.1fs! (Принято: %s)",
+							stallDuration.Seconds(),
+							stats.FormatBitsPerSecond(rxDelta, tickInterval))
+						isStalled = false
+					}
+					stallDuration = 0
+				}
+
+				if logger.DebugEnabled() && (txDelta > 0 || rxDelta > 0 || st.Pushed > 0) {
+					logger.Debugf("[LIVE STATS] Стримы: %d/%d активны | TX: %s | RX: %s | Reseq gaps: %d (всего: push=%d, deliv=%d, late=%d)",
+						connCount, totalSlots,
+						stats.FormatBitsPerSecond(txDelta, tickInterval),
+						stats.FormatBitsPerSecond(rxDelta, tickInterval),
+						st.GapsTimedOut, st.Pushed, st.Delivered, st.LateDelivered)
 				}
 			}
 		}

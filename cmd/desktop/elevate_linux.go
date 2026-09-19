@@ -35,15 +35,37 @@ func relaunchElevated(extraArgs []string) error {
 	}
 	if v := os.Getenv("VKTURN_DEBUG"); v != "" {
 		envArgs = append(envArgs, "VKTURN_DEBUG="+v)
+	} else if debugMode {
+		envArgs = append(envArgs, "VKTURN_DEBUG=1")
 	}
 	if v := os.Getenv("VKTURN_PORTAL_URL"); v != "" {
 		envArgs = append(envArgs, "VKTURN_PORTAL_URL="+v)
 	}
 	args := append(envArgs, self)
+	if cfgPath, err := CachePath(); err == nil && cfgPath != "" {
+		args = append(args, "-config", cfgPath)
+	}
+	if debugMode {
+		args = append(args, "-debug")
+	}
 	args = append(args, extraArgs...)
-	cmd := exec.Command("pkexec", args...)
+
+	binary := "pkexec"
+	if (os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "") || !commandAvailable("pkexec") {
+		if commandAvailable("sudo") {
+			binary = "sudo"
+		}
+	}
+
+	cmd := exec.Command(binary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+

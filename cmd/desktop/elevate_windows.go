@@ -35,9 +35,13 @@ func relaunchElevated(extraArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("relaunchElevated: resolve self path: %w", err)
 	}
+	args := append([]string(nil), extraArgs...)
+	if cfgPath, err := CachePath(); err == nil && cfgPath != "" {
+		args = append(args, "-config", fmt.Sprintf("%q", cfgPath))
+	}
 	verb, _ := syscall.UTF16PtrFromString("runas")
 	file, _ := syscall.UTF16PtrFromString(self)
-	params, _ := syscall.UTF16PtrFromString(strings.Join(extraArgs, " "))
+	params, _ := syscall.UTF16PtrFromString(strings.Join(args, " "))
 	dir, _ := syscall.UTF16PtrFromString("")
 	const swShowNormal = 1
 	ret, _, _ := procShellExecuteW.Call(

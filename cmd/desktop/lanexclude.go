@@ -126,19 +126,25 @@ func rangeToCIDRs(lo, hi uint32) []string {
 }
 
 // publicRoutes returns the IPv4 public-internet address space as a minimal
-// set of CIDR blocks: the full space minus privateIPv4CIDRs. Used as
-// autoSystemRoutingTable for the tun xray inbound, so LAN devices stay
-// reachable outside the tunnel (same policy as Android's
-// RealityVpnService.excludeLanFromAllowedIps) instead of routing a blanket
-// 0.0.0.0/0.
+// set of CIDR blocks: the full space minus privateIPv4CIDRs.
 func publicRoutes() []string {
+	return publicRoutesWithExclusions(nil)
+}
+
+// publicRoutesWithExclusions returns the IPv4 public-internet address space minus
+// privateIPv4CIDRs and any custom CIDRs (e.g. user bypass IPs). This ensures
+// the OS routing table bypasses the TUN interface for these subnets, routing them
+// directly through the physical uplink interface.
+func publicRoutesWithExclusions(customCIDRs []string) []string {
 	var excluded []ipv4Range
-	for _, c := range privateIPv4CIDRs {
+	allCIDRs := append([]string(nil), privateIPv4CIDRs...)
+	allCIDRs = append(allCIDRs, customCIDRs...)
+
+	for _, c := range allCIDRs {
 		r, err := cidrToRange(c)
 		if err != nil {
-			// privateIPv4CIDRs is a fixed compile-time literal — a parse
-			// failure here is a bug in this file, not a runtime condition.
-			panic(fmt.Sprintf("lanexclude: invalid entry in privateIPv4CIDRs: %v", err))
+			// Skip invalid user entries gracefully
+			continue
 		}
 		excluded = append(excluded, r)
 	}
@@ -148,3 +154,4 @@ func publicRoutes() []string {
 	}
 	return out
 }
+

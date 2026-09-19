@@ -44,5 +44,14 @@ func SendFD(protectPath string, fd int) error {
 	if err != nil {
 		return err
 	}
-	return opErr
+	if opErr != nil {
+		return opErr
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	ackBuf := make([]byte, 1)
+	if _, err := conn.Read(ackBuf); err != nil {
+		return err
+	}
+	return nil
 }

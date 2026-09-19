@@ -23,13 +23,13 @@ import (
 // если предыдущая ошибка - дедлайн). connchan получает свежую половину
 // AsyncPacketPipe на каждой попытке; okchan (non-nil только для потока 1)
 // сигнализирует о первом успешном handshake.
-func DTLSLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *Packet, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int) {
+func DTLSLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *Packet, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int, connected *atomic.Bool) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			err := oneDTLS(ctx, deps, params, peer, listenConn, inboundChan, connchan, okchan, streamID)
+			err := oneDTLS(ctx, deps, params, peer, listenConn, inboundChan, connchan, okchan, streamID, connected)
 			// При активном provider-backoff дедлайн handshake срабатывает раньше,
 			// чем auth-retry успевает отработать; делаем краткий backoff,
 			// чтобы не крутиться в tight spin до снятия блокировки.
@@ -109,7 +109,23 @@ func TURNLoop(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr
 	}
 }
 
-func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *Packet, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int) error {
+func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *Packet, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int, connected *atomic.Bool) error {
+	defer func() {
+		if connected != nil {
+			connected.Store(false)
+		}
+		// Дренируем оставшиеся пакеты из буфера, чтобы они не зависали на секунды
+		// во время разрыва или бэкоффа реконнекта.
+		for {
+			select {
+			case pkt := <-inboundChan:
+				packetPool.Put(pkt)
+			default:
+				return
+			}
+		}
+	}()
+
 	select {
 	case <-time.After(time.Duration(randx.Intn(400)+100) * time.Millisecond):
 	case <-ctx.Done():
@@ -159,6 +175,10 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		return fmt.Errorf("failed to write client ID: %w", err)
 	}
 
+	if connected != nil {
+		connected.Store(true)
+	}
+
 	if okchan != nil {
 		go func() {
 			select {
@@ -177,6 +197,11 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 
 	wg.Go(func() {
 		defer dtlscancel()
+		defer func() {
+			if connected != nil {
+				connected.Store(false)
+			}
+		}()
 		for {
 			select {
 			case <-dtlsctx.Done():
@@ -185,7 +210,7 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 				_, werr := dtlsConn.Write(pkt.Data[:pkt.N])
 				packetPool.Put(pkt)
 				if werr != nil {
-					deps.log().Debugf("[STREAM %d] DTLS write error: %v", streamID, werr)
+					deps.log().Warnf("[STREAM %d] DTLS write error: %v", streamID, werr)
 					return
 				}
 			}
@@ -195,6 +220,7 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	wg.Go(func() {
 		defer dtlscancel()
 		buf := make([]byte, 1600)
+		var lastEpoch uint16
 		for {
 			n, err1 := dtlsConn.Read(buf)
 			if err1 != nil {
@@ -202,7 +228,23 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			}
 
 			if deps.DownlinkReseq != nil {
-				if seq, _, payload, ok := reseq.Unwrap(buf[:n]); ok {
+				if seq, epoch, payload, ok := reseq.Unwrap(buf[:n]); ok {
+					if epoch != 0 {
+						if deps.DownlinkEpoch != nil {
+							prev := deps.DownlinkEpoch.Load()
+							if prev != 0 && uint32(epoch) != prev {
+								deps.log().Infof("[STREAM %d] downlink epoch change detected (%d -> %d), resetting resequencer", streamID, prev, epoch)
+								deps.DownlinkReseq.Reset()
+							}
+							deps.DownlinkEpoch.Store(uint32(epoch))
+						} else {
+							if lastEpoch != 0 && epoch != lastEpoch {
+								deps.log().Infof("[STREAM %d] downlink epoch change detected (%d -> %d), resetting resequencer", streamID, lastEpoch, epoch)
+								deps.DownlinkReseq.Reset()
+							}
+							lastEpoch = epoch
+						}
+					}
 					deps.DownlinkReseq.Push(seq, payload)
 					continue
 				}

@@ -250,3 +250,83 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-telegram:
+    name: Telegram announce
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    steps:
+      - name: Send release message
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Telegram credentials not configured, skipping"
+            exit 0
+          fi
+
+          BODY=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | head -c 3000)
+          URL=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json url -q .url 2>/dev/null)
+          TAG="$GITHUB_REF_NAME"
+
+          LINUX_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-linux-amd64"
+          LINUX_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-linux-arm64"
+          WIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-windows-amd64.exe"
+          DARWIN_ARM64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-darwin-arm64"
+          DARWIN_AMD64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/client-darwin-amd64"
+          DESKTOP_WIN_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-desktop-windows-amd64.exe"
+          DESKTOP_LINUX_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/vkturn-desktop-linux-amd64"
+
+          # GH-markdown -> Telegram-HTML: сначала экранируем HTML, потом размечаем.
+          # Хвосты "by @user in <PR-url>" из авто-нотов убираем - в посте это шум.
+          HTML=$(printf '%s' "$BODY" \
+            | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
+            | sed -E \
+                -e 's| by @[[:alnum:]_-]+ in https://[^[:space:]]+||g' \
+                -e 's|\[([^]]+)\]\((https?://[^)]+)\)|<a href="\2">\1</a>|g' \
+                -e 's|\*\*([^*]+)\*\*|<b>\1</b>|g' \
+                -e 's|`([^`]+)`|<code>\1</code>|g' \
+                -e 's|^#{1,6}[[:space:]]+(.*)$|<b>\1</b>|' \
+                -e 's|^[-*][[:space:]]+|- |')
+          TEXT=$(printf '<b>FreeTurn Proxy %s</b>\n\n%s\n\n<b>Скачать бинарники:</b>\n- Desktop: <a href="%s">Windows</a> | <a href="%s">Linux</a>\n- CLI: <a href="%s">Linux x86_64</a> | <a href="%s">arm64</a> | <a href="%s">Windows</a> | <a href="%s">macOS</a>\n\n<a href="%s">Релиз на GitHub</a>' \
+            "$TAG" "$HTML" "$DESKTOP_WIN_URL" "$DESKTOP_LINUX_URL" "$LINUX_AMD64_URL" "$LINUX_ARM64_URL" "$WIN_AMD64_URL" "$DARWIN_ARM64_URL" "$URL")
+
+          EXTRA_ARGS=()
+          if [ -n "$THREAD_ID" ]; then
+            EXTRA_ARGS+=(--data-urlencode "message_thread_id=$THREAD_ID")
+          fi
+
+          send() {
+            curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              "${EXTRA_ARGS[@]}" \
+              --data-urlencode "text=$1" \
+              --data-urlencode "parse_mode=${2:-}" \
+              --data-urlencode "disable_web_page_preview=true" \
+              -o /dev/null
+          }
+
+          send "$TEXT" HTML || send "$(printf 'FreeTurn Proxy %s\n\n%s\n\nРелиз: %s' "$TAG" "$BODY" "$URL")"
+
+          # Также пробуем отправить ключевые бинарники прямо файлом в тему (<50MB)
+          mkdir -p /tmp/bin-dl
+          if gh release download "$TAG" -p "client-linux-amd64" -p "client-windows-amd64.exe" -p "vkturn-desktop-windows-amd64.exe" --repo "$GITHUB_REPOSITORY" -D /tmp/bin-dl 2>/dev/null; then
+            for BIN_FILE in /tmp/bin-dl/*; do
+              if [ -f "$BIN_FILE" ]; then
+                DOC_EXTRA_ARGS=()
+                if [ -n "$THREAD_ID" ]; then
+                  DOC_EXTRA_ARGS+=(-F "message_thread_id=$THREAD_ID")
+                fi
+                FNAME=$(basename "$BIN_FILE")
+                curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+                  -F "chat_id=${CHAT_ID}" \
+                  "${DOC_EXTRA_ARGS[@]}" \
+                  -F "document=@${BIN_FILE}" \
+                  -F "caption=freeturn ${TAG} (${FNAME})" \
+                  -o /dev/null || true
+              fi
+            done
+          fi

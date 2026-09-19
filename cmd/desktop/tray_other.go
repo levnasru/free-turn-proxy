@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build (darwin && cgo) || (linux && cgo && appindicator)
 
 // cmd/desktop/tray_other.go
 package main

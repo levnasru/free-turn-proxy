@@ -32,6 +32,13 @@ func buildClientArgs(cfg *DesktopConfig) (args, env []string) {
 	if streams == 0 {
 		streams = 10
 	}
+	n := streams
+	if len(cfg.HubURLs) > 1 {
+		n = (streams + len(cfg.HubURLs) - 1) / len(cfg.HubURLs)
+		if n < 1 {
+			n = 1
+		}
+	}
 	args = []string{
 		"-provider", "hub",
 		"-hub-url", strings.Join(cfg.HubURLs, ","),
@@ -40,7 +47,7 @@ func buildClientArgs(cfg *DesktopConfig) (args, env []string) {
 		"-mode", "tcp", "-bond",
 		"-obf-profile", cfg.ObfProfile,
 		"-obf-key", cfg.ObfKey,
-		"-n", strconv.Itoa(streams),
+		"-n", strconv.Itoa(n),
 		"-listen", fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort),
 	}
 	if debugMode {
@@ -65,8 +72,94 @@ func RunClient(ctx context.Context, clientBinPath string, cfg *DesktopConfig, st
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	return cmd.Run()
+	cmd.WaitDelay = 3 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			return cmd.Process.Kill()
+		}
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	err := cmd.Run()
+	fixClientConfigPermissions()
+	return err
 }
+
+func buildClientWGArgs(cfg *DesktopConfig) (args, env []string) {
+	streams := cfg.Streams
+	if streams == 0 {
+		streams = 10
+	}
+	n := streams
+	if len(cfg.HubURLs) > 1 {
+		n = (streams + len(cfg.HubURLs) - 1) / len(cfg.HubURLs)
+		if n < 1 {
+			n = 1
+		}
+	}
+	peer := cfg.WgPeer
+	if peer == "" {
+		host, _, err := net.SplitHostPort(cfg.Peer)
+		if err == nil {
+			peer = net.JoinHostPort(host, "56005")
+		} else {
+			peer = "89.124.71.77:56005"
+		}
+	}
+	args = []string{
+		"-provider", "hub",
+		"-hub-url", strings.Join(cfg.HubURLs, ","),
+		"-hub-pin", cfg.HubPin,
+		"-peer", peer,
+		"-mode", "udp",
+		"-batch", "8",
+		"-obf-profile", cfg.ObfProfile,
+		"-obf-key", cfg.ObfKey,
+		"-n", strconv.Itoa(n),
+		"-listen", fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort),
+	}
+	if debugMode {
+		args = append(args, "-debug")
+	}
+	env = []string{"VKTURN_HUB_TOKEN=" + cfg.HubToken}
+	return args, env
+}
+
+// RunClientWG spawns cmd/client in UDP mode for WireGuard tunneling.
+func RunClientWG(ctx context.Context, clientBinPath string, cfg *DesktopConfig, stdout, stderr io.Writer, extraArgs ...string) error {
+	args, env := buildClientWGArgs(cfg)
+	args = append(args, extraArgs...)
+	cmd := exec.CommandContext(ctx, clientBinPath, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = 3 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			return cmd.Process.Kill()
+		}
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	err := cmd.Run()
+	fixClientConfigPermissions()
+	return err
+}
+
+func fixClientConfigPermissions() {
+	if dir, err := binDir(); err == nil {
+		chownToOriginalUserIfElevated(filepath.Join(dir, "client_config.json"))
+	}
+	if ucd, err := os.UserConfigDir(); err == nil {
+		chownToOriginalUserIfElevated(filepath.Join(ucd, "client_config.json"))
+	}
+	chownToOriginalUserIfElevated("client_config.json")
+}
+
 
 // convertSubscription decodes a 3x-ui-style subscription body (base64 of
 // newline-separated share-links, or plain-text share-links if the body
@@ -167,15 +260,18 @@ const vkTurnIPCheckURL = "https://api.ipify.org"
 
 // buildVKTurnBridgeConfig returns the xray JSON config for the local
 // SOCKS-inbound -> VLESS-outbound bridge that makes cmd/client's raw TCP
-// listener on 127.0.0.1:9000 usable as an actual proxy. Mirrors the manual
-// onboarding kits' client.json exactly (same port, same shared UUID — that
-// UUID is validated server-side by the family's existing VPS Xray backend,
-// unrelated to and unchanged by this codebase).
-func buildVKTurnBridgeConfig() string {
+// listener on 127.0.0.1:9000 usable as an actual proxy. Includes freedom
+// outbound and routing rules for bypassDomains and bypassIPs.
+func buildVKTurnBridgeConfig(bypassDomains, bypassIPs []string) string {
 	logLevel := "warning"
 	if debugMode {
 		logLevel = "debug"
 	}
+	domainsJSON, _ := json.Marshal(bypassDomains)
+	ips := append([]string(nil), privateIPv4CIDRs...)
+	ips = append(ips, bypassIPs...)
+	ipsJSON, _ := json.Marshal(ips)
+
 	return fmt.Sprintf(`{
   "log": { "loglevel": %q },
   "inbounds": [
@@ -184,11 +280,16 @@ func buildVKTurnBridgeConfig() string {
       "listen": "127.0.0.1",
       "port": %d,
       "settings": { "udp": true },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
     }
   ],
   "outbounds": [
     {
+      "tag": "proxy",
       "protocol": "vless",
       "settings": {
         "vnext": [
@@ -202,9 +303,34 @@ func buildVKTurnBridgeConfig() string {
         ]
       },
       "streamSettings": { "network": "tcp", "security": "none" }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
     }
-  ]
-}`, logLevel, vkTurnLocalSocksPort, vkTurnClientListenPort, vkTurnBridgeUUID)
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": %s
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": %s
+      },
+      {
+        "type": "field",
+        "outboundTag": "proxy",
+        "network": "tcp,udp"
+      }
+    ]
+  }
+}`, logLevel, vkTurnLocalSocksPort, vkTurnClientListenPort, vkTurnBridgeUUID, domainsJSON, ipsJSON)
 }
 
 // vkTurnTunInterfaceName is the TUN adapter name xray creates for tun mode —
@@ -221,7 +347,7 @@ const vkTurnTunInterfaceName = "vkturn0"
 // README, "CONSIDERATIONS" — the classic tun routing loop). routes is
 // publicRoutes()'s output: the public-internet complement of the private/LAN
 // CIDR list, so local devices stay reachable outside the tunnel.
-func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, error) {
+func buildVKTurnTunConfig(physicalInterface string, routes []string, bypassDomains, bypassIPs []string) (string, error) {
 	logLevel := "warning"
 	if debugMode {
 		logLevel = "debug"
@@ -230,6 +356,11 @@ func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("buildVKTurnTunConfig: marshal routes: %w", err)
 	}
+	domainsJSON, _ := json.Marshal(bypassDomains)
+	ips := append([]string(nil), privateIPv4CIDRs...)
+	ips = append(ips, bypassIPs...)
+	ipsJSON, _ := json.Marshal(ips)
+
 	return fmt.Sprintf(`{
   "log": { "loglevel": %q },
   "inbounds": [
@@ -237,14 +368,20 @@ func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, er
       "protocol": "tun",
       "settings": {
         "name": %q,
-        "mtu": 1500,
+        "mtu": 1360,
         "autoOutboundsInterface": %q,
         "autoSystemRoutingTable": %s
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ],
   "outbounds": [
     {
+      "tag": "proxy",
       "protocol": "vless",
       "settings": {
         "vnext": [
@@ -258,10 +395,36 @@ func buildVKTurnTunConfig(physicalInterface string, routes []string) (string, er
         ]
       },
       "streamSettings": { "network": "tcp", "security": "none" }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
     }
-  ]
-}`, logLevel, vkTurnTunInterfaceName, physicalInterface, routesJSON, vkTurnClientListenPort, vkTurnBridgeUUID), nil
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": %s
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": %s
+      },
+      {
+        "type": "field",
+        "outboundTag": "proxy",
+        "network": "tcp,udp"
+      }
+    ]
+  }
+}`, logLevel, vkTurnTunInterfaceName, physicalInterface, routesJSON, vkTurnClientListenPort, vkTurnBridgeUUID, domainsJSON, ipsJSON), nil
 }
+
 
 // waitForListening polls addr with short-lived TCP dials until one succeeds
 // or timeout elapses, so callers don't have to guess a fixed sleep for a
@@ -287,6 +450,28 @@ func waitForListening(ctx context.Context, addr string, timeout time.Duration) e
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// waitForVKTurnUDPReady polls UDP port until the client binds it (detecting EADDRINUSE)
+// or timeout expires.
+func waitForVKTurnUDPReady(ctx context.Context, port int, timeout time.Duration) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		pc, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			// Port is successfully bound by the client process!
+			return nil
+		}
+		_ = pc.Close()
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Errorf("таймаут ожидания UDP %s", addr)
 }
 
 // checkVKTurnConnectivity is the positive control this project's CLAUDE.md
@@ -349,6 +534,16 @@ func RunXray(ctx context.Context, xrayBinPath, xrayJSON string, stdout, stderr i
 	cmd := exec.CommandContext(ctx, xrayBinPath, "run", "-c", tmp.Name())
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	cmd.WaitDelay = 3 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			return cmd.Process.Kill()
+		}
+		return cmd.Process.Signal(os.Interrupt)
+	}
 	return cmd.Run()
 }
 

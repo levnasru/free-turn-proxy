@@ -87,12 +87,33 @@ const maxLoginAttempts = 3
 // skips straight to vk-turn (tun) instead of showing the interactive menu
 // again in the elevated process.
 var tunElevated = flag.Bool("tun-elevated", false,
-	"внутренний флаг: пропустить меню, сразу поднять vk-turn (tun) (используется relaunchElevated)")
+	"внутренний флаг: пропустить меню, сразу поднять tun (используется relaunchElevated)")
+
+var tunModeFlag = flag.String("tun-mode", "wg",
+	"тип tun: wg | xray (используется с -tun-elevated или -mode tun)")
+
+var modeFlag = flag.String("mode", "",
+	"режим работы: socks | wg-tun | xray-tun | xray (пропускает меню)")
+
+var configPathFlag = flag.String("config", "",
+	"путь к файлу config.json (используется при повышении прав или ручном запуске)")
+
+var debugFlag = flag.Bool("debug", false,
+	"включить подробную отладку (verbose debug log)")
 
 func main() {
 	flag.Parse()
+	if *debugFlag {
+		debugMode = true
+	}
 
-	cfg, err := LoadCache()
+	var cfg *DesktopConfig
+	var err error
+	if *configPathFlag != "" {
+		cfg, err = LoadCacheFrom(*configPathFlag)
+	} else {
+		cfg, err = LoadCache()
+	}
 	if err != nil {
 		cfg, err = loginWithRetries()
 		if err != nil {
@@ -102,23 +123,77 @@ func main() {
 	}
 
 	if *tunElevated {
-		runMode(cfg, "vk-turn-tun")
+		if *tunModeFlag == "xray" {
+			runMode(cfg, "vk-turn-xray-tun")
+		} else {
+			runMode(cfg, "vk-turn-wg-tun")
+		}
 		return
 	}
 
+	if *modeFlag != "" {
+		switch *modeFlag {
+		case "socks", "vk-turn":
+			runMode(cfg, "vk-turn")
+			return
+		case "wg", "wg-tun", "vk-turn-wg-tun":
+			runMode(cfg, "vk-turn-wg-tun")
+			return
+		case "xray-tun", "vk-turn-xray-tun":
+			runMode(cfg, "vk-turn-xray-tun")
+			return
+		case "tun", "vk-turn-tun":
+			if *tunModeFlag == "xray" {
+				runMode(cfg, "vk-turn-xray-tun")
+			} else {
+				runMode(cfg, "vk-turn-wg-tun")
+			}
+			return
+		case "xray":
+			runMode(cfg, "xray")
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "Неизвестный режим %q (доступны: socks, wg-tun, xray-tun, xray)\n", *modeFlag)
+			os.Exit(1)
+		}
+	}
+
 	for {
-		choice, err := RunMenu([]string{"vk-turn (socks)", "vk-turn (tun)", "xray-подписка", "обновить конфиг", "выход"})
+		debugLabel := "подробная отладка (debug: выкл)"
+		if debugMode {
+			debugLabel = "подробная отладка (debug: ВКЛ)"
+		}
+		choice, err := RunMenu([]string{
+			"vk-turn (wg tun)",
+			"vk-turn (xray tun)",
+			"vk-turn (socks)",
+			"xray-подписка",
+			"сайты мимо туннеля (direct)",
+			debugLabel,
+			"обновить конфиг",
+			"выход",
+		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\nМеню прервано:", err)
 			return
 		}
 		switch choice {
+		case "vk-turn (wg tun)":
+			runMode(cfg, "vk-turn-wg-tun")
+		case "vk-turn (xray tun)":
+			runMode(cfg, "vk-turn-xray-tun")
 		case "vk-turn (socks)":
 			runMode(cfg, "vk-turn")
-		case "vk-turn (tun)":
-			runMode(cfg, "vk-turn-tun")
 		case "xray-подписка":
 			runMode(cfg, "xray")
+		case "сайты мимо туннеля (direct)":
+			manageBypassRules(cfg)
+		case "подробная отладка (debug: выкл)":
+			debugMode = true
+			fmt.Println("\nРежим подробной отладки ВКЛЮЧЕН (логи дублируются на экран и в ~/.vkturn/debug.log).")
+		case "подробная отладка (debug: ВКЛ)":
+			debugMode = false
+			fmt.Println("\nРежим отладки ВЫКЛЮЧЕН.")
 		case "обновить конфиг":
 			refreshed, err := loginFlow()
 			if err != nil {
@@ -131,6 +206,89 @@ func main() {
 		}
 	}
 }
+
+func manageBypassRules(cfg *DesktopConfig) {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		entries, _ := readRawUserBypassEntries()
+		domains, ips := collectBypassRules(cfg)
+		path, _ := bypassFilePath()
+
+		fmt.Println("\n=== Настройка сайтов и IP мимо туннеля (Whitelist / Direct) ===")
+		fmt.Printf("Файл правил: %s\n", path)
+		fmt.Printf("Всего активно: %d доменов, %d IP/подсетей (включая дефолтные сервисы РФ: Госуслуги, VK, банки, Яндекс)\n", len(domains), len(ips))
+		fmt.Printf("Пользовательских правил в файле (%d):\n", len(entries))
+		if len(entries) == 0 {
+			fmt.Println("  (список пуст — действуют только встроенные правила)")
+		} else {
+			for i, e := range entries {
+				fmt.Printf("  %d. %s\n", i+1, e)
+			}
+		}
+
+		choice, err := RunMenu([]string{
+			"добавить сайт или IP/подсеть",
+			"удалить правило",
+			"открыть файл в текстовом редакторе",
+			"очистить пользовательский список",
+			"назад в главное меню",
+		})
+		if err != nil {
+			return
+		}
+
+		switch choice {
+		case "добавить сайт или IP/подсеть":
+			fmt.Print("\nВведите домен (например, ozon.ru) или IP/CIDR (например, 195.82.146.120 или 95.163.0.0/16): ")
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if line != "" {
+				if err := addUserBypassEntry(line); err != nil {
+					fmt.Fprintln(os.Stderr, "Ошибка добавления:", err)
+				} else {
+					fmt.Printf("✓ Добавлено: %s\n", line)
+				}
+			}
+		case "удалить правило":
+			if len(entries) == 0 {
+				fmt.Println("\nСписок пуст, нечего удалять.")
+				continue
+			}
+			fmt.Printf("\nВведите номер правила для удаления (1..%d): ", len(entries))
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			var idx int
+			if _, err := fmt.Sscanf(line, "%d", &idx); err == nil && idx >= 1 && idx <= len(entries) {
+				if err := removeUserBypassEntry(idx); err != nil {
+					fmt.Fprintln(os.Stderr, "Ошибка удаления:", err)
+				} else {
+					fmt.Printf("✓ Удалено правило #%d (%s)\n", idx, entries[idx-1])
+				}
+			} else {
+				fmt.Println("Неверный номер.")
+			}
+		case "открыть файл в текстовом редакторе":
+			if err := openInSystemEditor(path); err != nil {
+				fmt.Fprintf(os.Stderr, "Не удалось открыть редактор: %v. Вы можете отредактировать %s вручную.\n", err, path)
+			} else {
+				fmt.Println("✓ Файл открыт в системном редакторе.")
+			}
+		case "очистить пользовательский список":
+			fmt.Print("\nТочно очистить все пользовательские правила? (y/N): ")
+			line, _ := reader.ReadString('\n')
+			if strings.ToLower(strings.TrimSpace(line)) == "y" {
+				if err := clearUserBypassList(); err != nil {
+					fmt.Fprintln(os.Stderr, "Ошибка очистки:", err)
+				} else {
+					fmt.Println("✓ Пользовательский список очищен.")
+				}
+			}
+		case "назад в главное меню":
+			return
+		}
+	}
+}
+
 
 // loginWithRetries runs loginFlow up to maxLoginAttempts times, looping
 // back to the prompt on failure (e.g. a mistyped password) instead of
@@ -179,7 +337,47 @@ func loginFlow() (*DesktopConfig, error) {
 	if err := SaveCache(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "Внимание: не удалось сохранить кеш конфига:", err)
 	}
+	_ = SaveSession(&SessionInfo{
+		BaseURL:   portalBaseURL,
+		Token:     token,
+		ExpiresAt: time.Now().Add(29 * 24 * time.Hour).Unix(),
+	})
 	return cfg, nil
+}
+
+// ensureFreshConfig silently checks if the hub has updated endpoints or tokens,
+// updating cache in background with a 5s timeout.
+// Preserves local user settings (direct domains, direct IPs, subscription URL).
+func ensureFreshConfig(ctx context.Context, currentCfg *DesktopConfig) *DesktopConfig {
+	sess, err := LoadSession()
+	if err != nil || sess.Token == "" {
+		return currentCfg
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	fresh, err := FetchConfig(syncCtx, sess.BaseURL, sess.Token)
+	if err != nil {
+		return currentCfg
+	}
+	if len(currentCfg.DirectDomains) > 0 && len(fresh.DirectDomains) == 0 {
+		fresh.DirectDomains = currentCfg.DirectDomains
+	}
+	if len(currentCfg.DirectIPs) > 0 && len(fresh.DirectIPs) == 0 {
+		fresh.DirectIPs = currentCfg.DirectIPs
+	}
+	if currentCfg.XraySubscriptionURL != "" && fresh.XraySubscriptionURL == "" {
+		fresh.XraySubscriptionURL = currentCfg.XraySubscriptionURL
+	}
+	if currentCfg.WgConfig != "" && fresh.WgConfig == "" {
+		fresh.WgConfig = currentCfg.WgConfig
+		fresh.WgPeer = currentCfg.WgPeer
+	}
+	if currentCfg.Streams > fresh.Streams {
+		fresh.Streams = currentCfg.Streams
+	}
+	_ = SaveCache(fresh)
+	return fresh
 }
 
 // promptXraySubscriptionURL asks for a subscription link when the portal
@@ -215,18 +413,31 @@ func reportModeExit(ctx context.Context, label string, err error) {
 }
 
 func runMode(cfg *DesktopConfig, mode string) {
+	cfg = ensureFreshConfig(context.Background(), cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sigCh; cancel() }()
-	defer signal.Stop(sigCh)
+	stopSig := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-stopSig:
+		}
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		close(stopSig)
+	}()
 
 	switch mode {
 	case "vk-turn":
 		runVKTurnMode(ctx, cancel, cfg)
-	case "vk-turn-tun":
-		runVKTurnTunMode(ctx, cancel, cfg)
+	case "vk-turn-wg", "vk-turn-wg-tun":
+		runVKTurnTunMode(ctx, cancel, cfg, "wg")
+	case "vk-turn-tun", "vk-turn-xray-tun":
+		runVKTurnTunMode(ctx, cancel, cfg, "xray")
 	case "xray":
 		runXraySubscriptionMode(ctx, cancel, cfg)
 	}
@@ -244,6 +455,8 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopC
 		fmt.Fprintln(os.Stderr, "Ошибка запуска:", err)
 		return
 	}
+
+	bypassDomains, bypassIPs := collectBypassRules(cfg)
 
 	clientBin, err := resolveClientBin()
 	if err != nil {
@@ -285,7 +498,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopC
 
 	xrayDone := make(chan error, 1)
 	go func() {
-		xrayDone <- RunXray(ctx, xrayBin, buildVKTurnBridgeConfig(), stdout, stderr)
+		xrayDone <- RunXray(ctx, xrayBin, buildVKTurnBridgeConfig(bypassDomains, bypassIPs), stdout, stderr)
 	}()
 
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", vkTurnLocalSocksPort)
@@ -305,7 +518,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopC
 	} else {
 		fmt.Println("Подключено, выходной IP:", ip)
 	}
-	fmt.Printf("Прокси: socks5://%s — укажите его в браузере или приложении. Ctrl+C — остановить.\n", socksAddr)
+	fmt.Printf("Прокси: socks5://%s — укажите его в браузере или приложении (исключено доменов: %d, IP/подсетей: %d). Ctrl+C — остановить.\n", socksAddr, len(bypassDomains), len(bypassIPs))
 
 	startTray(ctx, cancel, "Подключено")
 	defer restoreConsole()

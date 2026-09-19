@@ -46,7 +46,38 @@ func Login(ctx context.Context, baseURL, username, password string) (string, err
 	return out.Token, nil
 }
 
+func FetchAndroidConfig(ctx context.Context, baseURL, token string) (*DesktopConfig, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/config?device=android", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("android config: unexpected status %d", resp.StatusCode)
+	}
+	var cfg DesktopConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func FetchConfig(ctx context.Context, baseURL, token string) (*DesktopConfig, error) {
+	type aResult struct {
+		cfg *DesktopConfig
+		err error
+	}
+	aChan := make(chan aResult, 1)
+	go func() {
+		ac, ae := FetchAndroidConfig(ctx, baseURL, token)
+		aChan <- aResult{cfg: ac, err: ae}
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/config", nil)
 	if err != nil {
 		return nil, err
@@ -64,6 +95,14 @@ func FetchConfig(ctx context.Context, baseURL, token string) (*DesktopConfig, er
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return nil, err
 	}
+
+	// Also fetch WireGuard profile from the portal (device=android provides the WG keypair & peer)
+	ar := <-aChan
+	if ar.err == nil && ar.cfg != nil {
+		cfg.WgConfig = ar.cfg.WgConfig
+		cfg.WgPeer = ar.cfg.Peer
+	}
+
 	return &cfg, nil
 }
 
@@ -87,7 +126,11 @@ func SaveCache(cfg *DesktopConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	chownToOriginalUserIfElevated(path)
+	return nil
 }
 
 func LoadCache() (*DesktopConfig, error) {
@@ -95,6 +138,10 @@ func LoadCache() (*DesktopConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadCacheFrom(path)
+}
+
+func LoadCacheFrom(path string) (*DesktopConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -105,3 +152,54 @@ func LoadCache() (*DesktopConfig, error) {
 	}
 	return &cfg, nil
 }
+
+
+type SessionInfo struct {
+	BaseURL   string `json:"baseUrl"`
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expiresAt"`
+}
+
+func SessionPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".vkturn", "session.json"), nil
+}
+
+func SaveSession(sess *SessionInfo) error {
+	path, err := SessionPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	chownToOriginalUserIfElevated(path)
+	return nil
+}
+
+func LoadSession() (*SessionInfo, error) {
+	path, err := SessionPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var sess SessionInfo
+	if err := json.Unmarshal(data, &sess); err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
