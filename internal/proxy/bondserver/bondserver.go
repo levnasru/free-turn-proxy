@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -199,6 +200,8 @@ func (c *serverConn) waitForInitialLanes() {
 	}
 }
 
+const defaultIdleTimeout = 90 * time.Second
+
 func (c *serverConn) readLane(l *serverLane) {
 	for {
 		f, err := bondframe.ReadFrame(l.stream)
@@ -207,7 +210,7 @@ func (c *serverConn) readLane(l *serverLane) {
 			select {
 			case <-c.ctx.Done():
 			default:
-				if !errors.Is(err, io.EOF) {
+				if !errors.Is(err, io.EOF) && !isClosedConnErr(err) {
 					c.deps.log().Debugf("[bond %d] lane %d read error: %v (lanes=%d)", c.id, l.index, err, left)
 				}
 				if left == 0 {
@@ -236,21 +239,22 @@ func (c *serverConn) run() {
 		return
 	}
 	defer func() {
-		if err := backendConn.Close(); err != nil {
-			c.deps.log().Errorf("[bond %d] close backend connection: %v", c.id, err)
+		if err := backendConn.Close(); err != nil && !isClosedConnErr(err) {
+			c.deps.log().Debugf("[bond %d] close backend connection: %v", c.id, err)
 		}
 	}()
-	context.AfterFunc(c.ctx, func() {
+	stopAfterFunc := context.AfterFunc(c.ctx, func() {
 		now := time.Now()
-		if err := backendConn.SetDeadline(now); err != nil {
-			c.deps.log().Errorf("[bond %d] backend deadline: %v", c.id, err)
+		if err := backendConn.SetDeadline(now); err != nil && !isClosedConnErr(err) {
+			c.deps.log().Debugf("[bond %d] backend deadline: %v", c.id, err)
 		}
 		for _, lane := range c.snapshotLanes() {
-			if err := lane.stream.SetDeadline(now); err != nil {
-				c.deps.log().Errorf("[bond %d] lane %d deadline: %v", c.id, lane.index, err)
+			if err := lane.stream.SetDeadline(now); err != nil && !isClosedConnErr(err) {
+				c.deps.log().Debugf("[bond %d] lane %d deadline: %v", c.id, lane.index, err)
 			}
 		}
 	})
+	defer stopAfterFunc()
 	c.deps.log().Debugf("[bond %d] backend connected", c.id)
 
 	var wg sync.WaitGroup
@@ -268,10 +272,19 @@ func (c *serverConn) copyBondToBackend(backendConn net.Conn) {
 	chunks := bondframe.Reorder(c.ctx, backendConn, c.recvCh, bondframe.ReorderHooks{
 		OnOverflow: func(_ int) {
 			c.deps.log().Errorf("[bond %d] pending map overflow (>%d), closing", c.id, bondframe.PendingCap)
+			c.cancel()
 		},
-		OnUnknownType: func(typ byte) { c.deps.log().Errorf("[bond %d] unknown frame type %d", c.id, typ) },
-		OnWriteError:  func(err error) { c.deps.log().Errorf("[bond %d] backend write error: %v", c.id, err) },
-		OnCloseWrite:  c.deps.log().Debugf,
+		OnUnknownType: func(typ byte) {
+			c.deps.log().Errorf("[bond %d] unknown frame type %d", c.id, typ)
+			c.cancel()
+		},
+		OnWriteError: func(err error) {
+			if !isClosedConnErr(err) {
+				c.deps.log().Errorf("[bond %d] backend write error: %v", c.id, err)
+			}
+			c.cancel()
+		},
+		OnCloseWrite: c.deps.log().Debugf,
 	})
 	c.deps.log().Debugf("[bond %d] upload to backend finished chunks=%d", c.id, chunks)
 }
@@ -281,6 +294,9 @@ func (c *serverConn) copyBackendToBond(backendConn net.Conn) {
 	var seq uint64
 	var laneIdx uint64
 	for {
+		if err := backendConn.SetReadDeadline(time.Now().Add(defaultIdleTimeout)); err != nil {
+			return
+		}
 		n, err := backendConn.Read(buf)
 		if n > 0 {
 			// writeToNextLane - синхронная запись (WriteFrame возвращается до
@@ -292,13 +308,16 @@ func (c *serverConn) copyBackendToBond(backendConn net.Conn) {
 			seq++
 		}
 		if err != nil {
+			if !isClosedConnErr(err) && !errors.Is(err, io.EOF) {
+				c.deps.log().Debugf("[bond %d] backend read finished: %v", c.id, err)
+			}
 			lanes := c.snapshotLanes()
 			for _, lane := range lanes {
 				lane.mu.Lock()
 				writeErr := bondframe.WriteFrame(lane.stream, bondframe.FrameFIN, seq, nil)
 				lane.mu.Unlock()
-				if writeErr != nil && c.ctx.Err() == nil {
-					c.deps.log().Errorf("[bond %d] lane %d write FIN error: %v", c.id, lane.index, writeErr)
+				if writeErr != nil && c.ctx.Err() == nil && !isClosedConnErr(writeErr) {
+					c.deps.log().Debugf("[bond %d] lane %d write FIN error: %v", c.id, lane.index, writeErr)
 				}
 			}
 			c.deps.log().Debugf("[bond %d] download from backend finished chunks=%d", c.id, seq)
@@ -348,3 +367,14 @@ func (c *serverConn) writeToNextLane(seq uint64, data []byte, laneIdx *uint64) e
 		lanes = c.snapshotLanes()
 	}
 }
+
+func isClosedConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
+

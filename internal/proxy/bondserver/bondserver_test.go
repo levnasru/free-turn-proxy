@@ -270,3 +270,22 @@ func TestRegistryGetDedup(t *testing.T) {
 	}
 	t.Fatal("registry did not drop conn after done")
 }
+
+func TestIsClosedConnErr(t *testing.T) {
+	if isClosedConnErr(nil) {
+		t.Fatal("nil should not be closed conn err")
+	}
+	if !isClosedConnErr(net.ErrClosed) {
+		t.Fatal("net.ErrClosed must match")
+	}
+	if !isClosedConnErr(io.EOF) {
+		t.Fatal("io.EOF must match")
+	}
+	if !isClosedConnErr(errors.New("read tcp 127.0.0.1:1234: use of closed network connection")) {
+		t.Fatal("closed network connection string must match")
+	}
+	if isClosedConnErr(errors.New("connection reset by peer")) {
+		t.Fatal("unrelated error should not match")
+	}
+}
+
