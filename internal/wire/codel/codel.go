@@ -241,9 +241,12 @@ func (q *Queue) Pop() ([]byte, error) {
 			r = q.dodequeue(now)
 			q.dropping = true
 
-			delta := q.count - q.lastCount
+			delta := uint32(0)
+			if q.count > q.lastCount {
+				delta = q.count - q.lastCount
+			}
 			q.count = 1
-			if delta > 1 && now.Sub(q.dropNext) < 16*Interval {
+			if delta > 1 && !now.Before(q.dropNext) && now.Sub(q.dropNext) < 16*Interval {
 				q.count = delta
 			}
 			q.dropNext = controlLaw(now, q.count)

@@ -325,3 +325,82 @@ func TestResequencerDwellNoIndefiniteAccumulation(t *testing.T) {
 		t.Errorf("expected [1, 4, 7], got %v", delivered)
 	}
 }
+
+func TestResequencerNaturalWrapAround(t *testing.T) {
+	var delivered []int
+	var mu sync.Mutex
+	r := New(20*time.Millisecond, func(payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, int(payload[0]))
+	})
+	defer r.Close()
+
+	// Advance sequence close to 2^32 - 1
+	startSeq := uint32(4294967293) // ^uint32(0) - 2
+	r.mu.Lock()
+	r.baseSeq = startSeq
+	r.mu.Unlock()
+
+	r.Push(startSeq, []byte{1})
+	r.Push(startSeq+1, []byte{2})
+	r.Push(startSeq+2, []byte{3}) // 4294967295
+	r.Push(0, []byte{4})          // wrap to 0
+	r.Push(1, []byte{5})          // wrap to 1 (must NOT trigger false reset!)
+	r.Push(2, []byte{6})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 6 {
+		t.Fatalf("expected 6 delivered across 32-bit wrap-around, got %d (%v)", len(delivered), delivered)
+	}
+	for i, expected := range []int{1, 2, 3, 4, 5, 6} {
+		if delivered[i] != expected {
+			t.Errorf("index %d: expected %d, got %d", i, expected, delivered[i])
+		}
+	}
+}
+
+func TestResequencerLateZeroPacket(t *testing.T) {
+	var delivered []int
+	var mu sync.Mutex
+	r := New(20*time.Millisecond, func(payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, int(payload[0]))
+	})
+	defer r.Close()
+
+	// Initial packet wraps near 0: packet 4294967295 arrives
+	startSeq := uint32(4294967295)
+	r.mu.Lock()
+	r.baseSeq = startSeq
+	r.mu.Unlock()
+	r.Push(startSeq, []byte{100})
+
+	// Packet 0 is dropped in transit. Packet 1 arrives!
+	r.Push(1, []byte{1})
+
+	// Wait for dwell timeout to expire on missing packet 0
+	time.Sleep(35 * time.Millisecond)
+
+	// Now late packet 0 arrives! It must be delivered via LateDelivered
+	r.Push(0, []byte{0})
+
+	mu.Lock()
+	defer mu.Unlock()
+	st := r.Stats()
+	if st.LateDelivered != 1 {
+		t.Errorf("expected 1 LateDelivered for late seq=0, got %d", st.LateDelivered)
+	}
+	foundZero := false
+	for _, p := range delivered {
+		if p == 0 {
+			foundZero = true
+			break
+		}
+	}
+	if !foundZero {
+		t.Errorf("expected payload 0 to be delivered to callback, got %v", delivered)
+	}
+}

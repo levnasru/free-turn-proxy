@@ -51,8 +51,9 @@ type Resequencer struct {
 
 	stats Stats
 
-	slots    [WindowSize]slot
-	timedOut [WindowSize]uint32
+	slots       [WindowSize]slot
+	timedOut    [WindowSize]uint32
+	timedOutOcc [WindowSize]bool
 
 	closed chan struct{}
 	ticker *time.Ticker
@@ -95,9 +96,10 @@ func (r *Resequencer) timerLoop() {
 // Push inserts a packet with sequence number `seq` and payload into the ring buffer.
 // Any packets that become contiguous are drained and delivered to onOrdered.
 func (r *Resequencer) Push(seq uint32, payload []byte) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	var toDeliver [][]byte
+	var latePkt []byte
 
+	r.mu.Lock()
 	r.stats.Pushed++
 
 	if !r.initialized {
@@ -108,23 +110,30 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 	diff := int32(seq - r.baseSeq)
 
 	// Case 1: Sequence reset or backwards jump.
-	// If the sequence restarted from 1 (while baseSeq > 1) or jumped backwards beyond the window,
+	// If the sequence restarted backwards from 1 (diff < 0) or jumped backwards beyond the window,
 	// the sender has restarted. Re-synchronize baseSeq immediately.
-	if (seq == 1 && r.baseSeq > 1) || diff < -WindowSize {
+	// Note: natural forward sequence wrap-around has diff >= 0 and is not a reset.
+	if (seq == 1 && diff < 0) || diff < -WindowSize {
 		r.drainAllLocked()
 		r.baseSeq = seq
 		diff = 0
 	} else if diff < 0 {
 		idx := seq & windowMask
-		if r.timedOut[idx] == seq {
+		if r.timedOutOcc[idx] && r.timedOut[idx] == seq {
 			// Late packet (arrived after its gap timed out).
 			// Deliver immediately to consumer so WireGuard / TCP receive it without loss.
+			r.timedOutOcc[idx] = false
 			r.timedOut[idx] = 0
 			r.stats.LateDelivered++
-			r.onOrdered(payload)
+			latePkt = make([]byte, len(payload))
+			copy(latePkt, payload)
 		} else {
 			// True duplicate of an already-delivered packet.
 			r.stats.StaleDropped++
+		}
+		r.mu.Unlock()
+		if latePkt != nil {
+			r.onOrdered(latePkt)
 		}
 		return
 	}
@@ -133,7 +142,7 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 	// Fast-forward baseSeq to avoid stalling the pipeline.
 	if diff >= WindowSize {
 		r.stats.WindowOverrun++
-		r.drainContiguousLocked()
+		toDeliver = append(toDeliver, r.drainContiguousLocked()...)
 		r.drainAllLocked()
 		r.baseSeq = seq
 		diff = 0
@@ -155,17 +164,24 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 
 	if diff == 0 {
 		// Packet at head arrived. Drain contiguous sequence.
-		r.drainContiguousLocked()
+		toDeliver = append(toDeliver, r.drainContiguousLocked()...)
 	} else {
 		// Out of order packet arrived, creating or widening a gap at baseSeq.
 		if r.gapDeadline.IsZero() {
 			r.gapDeadline = s.receivedAt.Add(r.dwellTimeout)
 		}
 	}
+	r.mu.Unlock()
+
+	for _, p := range toDeliver {
+		r.onOrdered(p)
+	}
 }
 
 // drainContiguousLocked delivers all sequential packets starting from baseSeq.
-func (r *Resequencer) drainContiguousLocked() {
+// Must be called while holding r.mu. Returns packets to deliver outside the lock.
+func (r *Resequencer) drainContiguousLocked() [][]byte {
+	var toDeliver [][]byte
 	for {
 		idx := r.baseSeq & windowMask
 		s := &r.slots[idx]
@@ -173,8 +189,11 @@ func (r *Resequencer) drainContiguousLocked() {
 			break
 		}
 
-		// Slot is in order: deliver and advance head
-		r.onOrdered(s.payload)
+		// Slot is in order: copy payload to deliver outside lock
+		p := make([]byte, len(s.payload))
+		copy(p, s.payload)
+		toDeliver = append(toDeliver, p)
+
 		r.stats.Delivered++
 		s.occupied = false
 		s.receivedAt = time.Time{}
@@ -195,6 +214,8 @@ func (r *Resequencer) drainContiguousLocked() {
 	} else {
 		r.gapDeadline = time.Time{}
 	}
+
+	return toDeliver
 }
 
 func (r *Resequencer) hasPendingSlotsLocked() bool {
@@ -218,12 +239,12 @@ func (r *Resequencer) earliestPendingReceivedLocked() time.Time {
 }
 
 func (r *Resequencer) checkTimeout(now time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	var toDeliver [][]byte
 
+	r.mu.Lock()
 	for r.pendingCount > 0 {
 		if r.gapDeadline.IsZero() || now.Before(r.gapDeadline) {
-			return
+			break
 		}
 
 		// Gap dwell timeout expired: skip the missing gap and advance baseSeq
@@ -235,13 +256,14 @@ func (r *Resequencer) checkTimeout(now time.Time) {
 				found = true
 				break
 			}
+			r.timedOutOcc[idx] = true
 			r.timedOut[idx] = r.baseSeq
 			r.stats.GapsTimedOut++
 			r.baseSeq++
 		}
 
 		if found {
-			r.drainContiguousLocked()
+			toDeliver = append(toDeliver, r.drainContiguousLocked()...)
 		}
 		if r.pendingCount > 0 {
 			earliest := r.earliestPendingReceivedLocked()
@@ -253,6 +275,11 @@ func (r *Resequencer) checkTimeout(now time.Time) {
 		} else {
 			r.gapDeadline = time.Time{}
 		}
+	}
+	r.mu.Unlock()
+
+	for _, p := range toDeliver {
+		r.onOrdered(p)
 	}
 }
 
@@ -268,6 +295,7 @@ func (r *Resequencer) drainAllLocked() {
 		r.slots[i].occupied = false
 		r.slots[i].receivedAt = time.Time{}
 		r.timedOut[i] = 0
+		r.timedOutOcc[i] = false
 	}
 	r.pendingCount = 0
 	r.gapDeadline = time.Time{}
@@ -301,5 +329,6 @@ func (r *Resequencer) Reset() {
 		r.slots[i].payload = r.slots[i].payload[:0]
 		r.slots[i].receivedAt = time.Time{}
 		r.timedOut[i] = 0
+		r.timedOutOcc[i] = false
 	}
 }

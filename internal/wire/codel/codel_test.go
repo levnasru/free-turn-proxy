@@ -161,3 +161,36 @@ func TestQueue_CloseUnblocksPop(t *testing.T) {
 		t.Fatal("Pop did not unblock after Close")
 	}
 }
+
+func TestQueue_UnderflowGuard(t *testing.T) {
+	q := NewQueue(20)
+
+	// Simulate state where count was 1 and lastCount was 10 from earlier episode
+	q.mu.Lock()
+	q.count = 1
+	q.lastCount = 10
+	q.dropNext = time.Now().Add(50 * time.Millisecond) // future scheduled drop
+
+	overloadTime := time.Now().Add(-(Target + Interval + 10*time.Millisecond))
+	for i := 0; i < 5; i++ {
+		q.buf = append(q.buf, item{data: []byte("pkt"), enqueued: overloadTime})
+	}
+	q.firstAboveTime = time.Now().Add(-time.Millisecond)
+	q.mu.Unlock()
+
+	// Pop triggers drop transition
+	got, err := q.Pop()
+	if err != nil {
+		t.Fatalf("Pop failed: %v", err)
+	}
+	if string(got) != "pkt" {
+		t.Fatalf("unexpected data: %q", got)
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// q.count MUST NOT underflow to ~4.29 billion!
+	if q.count > 100 {
+		t.Fatalf("q.count underflowed! count = %d", q.count)
+	}
+}
