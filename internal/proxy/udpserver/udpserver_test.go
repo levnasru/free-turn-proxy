@@ -521,3 +521,102 @@ func TestUDPServerEpochGhostSlotElimination(t *testing.T) {
 	}
 }
 
+func TestUDPServerZeroEpochGhostSlotElimination(t *testing.T) {
+	logger := logx.New(false)
+	reg := NewRegistry(Deps{Log: logger, BatchSize: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("backend listen: %v", err)
+	}
+	defer backend.Close()
+	backendAddr := backend.LocalAddr().String()
+
+	clientID := "client-zero-epoch-test"
+	s1, c1 := newMockPacketConn()
+	s2, c2 := newMockPacketConn()
+	s3, _ := newMockPacketConn()
+	s4, c4 := newMockPacketConn()
+
+	// Session 1: slot 1 and slot 2 connect
+	go reg.Handle(ctx, logger, s1, backendAddr, clientID)
+	go reg.Handle(ctx, logger, s2, backendAddr, clientID)
+	time.Sleep(20 * time.Millisecond)
+
+	// Slot 1 sends packet with epoch 100
+	p1 := reseq.Wrap(nil, []byte("epoch-100-packet"), 1, 100)
+	_, _ = c1.Write(p1)
+
+	buf := make([]byte, 1024)
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, rerr := backend.ReadFrom(buf)
+	if rerr != nil {
+		t.Fatalf("read backend epoch 100: %v", rerr)
+	}
+	if string(buf[:n]) != "epoch-100-packet" {
+		t.Fatalf("got %s, want epoch-100-packet", string(buf[:n]))
+	}
+
+	// Slot 2 never sent any packets (epoch remains 0).
+	// Simulate time passing (slot 2 was created in previous session)
+	reg.mu.Lock()
+	sess := reg.sessions[clientID+"@"+backendAddr]
+	reg.mu.Unlock()
+	sess.slotsMu.Lock()
+	for _, sl := range sess.slots {
+		if sl.conn == s2 {
+			sl.createdAt = time.Now().Add(-10 * time.Second)
+		}
+	}
+	sess.slotsMu.Unlock()
+
+	// Session 2: slot 3 and slot 4 connect
+	go reg.Handle(ctx, logger, s3, backendAddr, clientID)
+	go reg.Handle(ctx, logger, s4, backendAddr, clientID)
+	time.Sleep(20 * time.Millisecond)
+
+	// Slot 4 sends first packet with epoch 200 (e.g. WireGuard handshake)
+	p4 := reseq.Wrap(nil, []byte("epoch-200-handshake"), 1, 200)
+	_, _ = c4.Write(p4)
+
+	_ = backend.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, sender4, rerr := backend.ReadFrom(buf)
+	if rerr != nil {
+		t.Fatalf("read backend epoch 200: %v", rerr)
+	}
+	if string(buf[:n]) != "epoch-200-handshake" {
+		t.Fatalf("got %s, want epoch-200-handshake", string(buf[:n]))
+	}
+
+	// Verify pruning:
+	// Slot 1 (epoch 100) must be pruned.
+	// Slot 2 (epoch 0, age > 5s) MUST be pruned!
+	// Slot 3 (epoch 0, age < 5s) kept.
+	// Slot 4 (epoch 200) kept.
+	sess.slotsMu.Lock()
+	count := len(sess.slots)
+	sess.slotsMu.Unlock()
+	if count != 2 {
+		t.Fatalf("expected exactly 2 slots (slot 3 and slot 4), got %d", count)
+	}
+
+	// Backend replies to sender4: downlink MUST route to slot 4 (curEpoch verified),
+	// and NEVER to slot 2 (pruned) or unverified slot 3!
+	_, _ = backend.WriteTo([]byte("downlink-handshake-response"), sender4)
+
+	select {
+	case pkt := <-c4.readCh:
+		seq, ep, payload, ok := reseq.Unwrap(pkt)
+		if !ok || ep != 200 || seq != 1 || string(payload) != "downlink-handshake-response" {
+			t.Fatalf("unexpected downlink on c4: ok=%v ep=%d seq=%d payload=%s", ok, ep, seq, string(payload))
+		}
+	case pkt := <-c2.readCh:
+		t.Fatalf("downlink was routed to dead ghost slot c2! pkt=%v", pkt)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for downlink on c4")
+	}
+}
+

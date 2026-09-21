@@ -15,8 +15,8 @@ const (
 	slotInboundBufferSize = 16
 	defaultBatchSize      = 4
 	sessionIdleGrace      = 2 * time.Minute
-	slotIdleTimeout       = 5 * time.Minute
-	maxClientSlots        = 200
+	slotIdleTimeout       = 90 * time.Second
+	maxClientSlots        = 60
 )
 
 // Deps объединяет зависимости хост-процесса для UDP-сервера.
@@ -33,12 +33,13 @@ func (d *Deps) log() logx.Logger {
 }
 
 type streamSlot struct {
-	id      int
-	conn    net.Conn
-	inbound chan []byte
-	done    chan struct{}
-	once    sync.Once
-	epoch   uint16
+	id        int
+	conn      net.Conn
+	inbound   chan []byte
+	done      chan struct{}
+	once      sync.Once
+	epoch     uint16
+	createdAt time.Time
 }
 
 func (s *streamSlot) close() {
@@ -203,6 +204,9 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 			kept = append(kept, sl)
 		} else if sl.epoch != 0 {
 			pruned = append(pruned, sl)
+		} else if !sl.createdAt.IsZero() && time.Since(sl.createdAt) > 5*time.Second {
+			// Слот не имеет текущей эпохи и был создан до волны текущего подключения (ghost-слот)
+			pruned = append(pruned, sl)
 		} else {
 			kept = append(kept, sl)
 		}
@@ -215,7 +219,7 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 	s.slotsMu.Unlock()
 
 	for _, sl := range pruned {
-		s.registry.deps.log().Debugf("udpserver [%s]: pruned ghost slot %d (old epoch %d)", s.clientID, sl.id, sl.epoch)
+		s.registry.deps.log().Debugf("udpserver [%s]: pruned ghost slot %d (old epoch %d, age %v)", s.clientID, sl.id, sl.epoch, time.Since(sl.createdAt).Round(time.Second))
 		sl.close()
 	}
 }
@@ -261,10 +265,11 @@ func (s *clientSession) addSlot(conn net.Conn) *streamSlot {
 	}
 
 	slot := &streamSlot{
-		id:      s.nextSlotID,
-		conn:    conn,
-		inbound: make(chan []byte, bufCap),
-		done:    make(chan struct{}),
+		id:        s.nextSlotID,
+		conn:      conn,
+		inbound:   make(chan []byte, bufCap),
+		done:      make(chan struct{}),
+		createdAt: time.Now(),
 	}
 	s.nextSlotID++
 	s.slots = append(s.slots, slot)
@@ -440,13 +445,27 @@ func (s *clientSession) route(data []byte) {
 
 	curEpoch := s.currentEpoch
 	candidates := make([]*streamSlot, 0, n)
-	for _, sl := range s.slots {
-		select {
-		case <-sl.done:
-			continue
-		default:
-			if curEpoch == 0 || sl.epoch == curEpoch || sl.epoch == 0 {
-				candidates = append(candidates, sl)
+	if curEpoch != 0 {
+		for _, sl := range s.slots {
+			select {
+			case <-sl.done:
+				continue
+			default:
+				if sl.epoch == curEpoch {
+					candidates = append(candidates, sl)
+				}
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		for _, sl := range s.slots {
+			select {
+			case <-sl.done:
+				continue
+			default:
+				if curEpoch == 0 || sl.epoch == 0 {
+					candidates = append(candidates, sl)
+				}
 			}
 		}
 	}
