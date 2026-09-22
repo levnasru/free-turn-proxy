@@ -77,6 +77,9 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 				tunType = "xray"
 			} else {
 				wgParsed = parsed
+				if *mtuFlag > 0 {
+					wgParsed.MTU = *mtuFlag
+				}
 			}
 		}
 	}

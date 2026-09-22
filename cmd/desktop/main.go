@@ -98,6 +98,9 @@ var modeFlag = flag.String("mode", "",
 var configPathFlag = flag.String("config", "",
 	"путь к файлу config.json (используется при повышении прав или ручном запуске)")
 
+var mtuFlag = flag.Int("mtu", 0,
+	"MTU для WireGuard / TUN туннеля (0 — авто: 1050 для VK-TURN солянки / 1420 для Reality)")
+
 var debugFlag = flag.Bool("debug", false,
 	"включить подробную отладку (verbose debug log)")
 
