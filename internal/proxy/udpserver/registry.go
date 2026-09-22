@@ -16,7 +16,7 @@ const (
 	defaultBatchSize      = 4
 	sessionIdleGrace      = 2 * time.Minute
 	slotIdleTimeout       = 90 * time.Second
-	maxClientSlots        = 60
+	maxClientSlots        = 256
 )
 
 // Deps объединяет зависимости хост-процесса для UDP-сервера.

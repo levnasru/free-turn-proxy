@@ -6,9 +6,19 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+// BaseClientID извлекает базовый идентификатор клиента, отсекая суффикс устройства
+// после '#', '@' или '/' (например, "user123#phone" -> "user123").
+func BaseClientID(clientID string) string {
+	if idx := strings.IndexAny(clientID, "#@/"); idx != -1 {
+		return clientID[:idx]
+	}
+	return clientID
+}
 
 // ClientInfo содержит метаданные о клиенте
 type ClientInfo struct {
@@ -62,11 +72,12 @@ func (db *DB) StartHotReload(interval time.Duration) {
 	}()
 }
 
-// IsAuthorized проверяет, разрешен ли клиент
+// IsAuthorized проверяет, разрешен ли клиент (учитывая возможный суффикс устройства)
 func (db *DB) IsAuthorized(clientID string) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	_, ok := db.data.Clients[clientID]
+	baseID := BaseClientID(clientID)
+	_, ok := db.data.Clients[baseID]
 	return ok
 }
 
@@ -75,7 +86,8 @@ func (db *DB) Add(clientID, comment string, maxStreams int) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	db.data.Clients[clientID] = ClientInfo{Comment: comment, MaxStreams: maxStreams}
+	baseID := BaseClientID(clientID)
+	db.data.Clients[baseID] = ClientInfo{Comment: comment, MaxStreams: maxStreams}
 	return db.save()
 }
 
@@ -86,14 +98,15 @@ func (db *DB) TryAcquireStream(clientID string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	info, ok := db.data.Clients[clientID]
+	baseID := BaseClientID(clientID)
+	info, ok := db.data.Clients[baseID]
 	if !ok {
 		return false
 	}
-	if info.MaxStreams > 0 && db.active[clientID] >= info.MaxStreams {
+	if info.MaxStreams > 0 && db.active[baseID] >= info.MaxStreams {
 		return false
 	}
-	db.active[clientID]++
+	db.active[baseID]++
 	return true
 }
 
@@ -102,8 +115,9 @@ func (db *DB) ReleaseStream(clientID string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if db.active[clientID] > 0 {
-		db.active[clientID]--
+	baseID := BaseClientID(clientID)
+	if db.active[baseID] > 0 {
+		db.active[baseID]--
 	}
 }
 

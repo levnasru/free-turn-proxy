@@ -313,15 +313,12 @@ func buildProvider(ctx context.Context, cfg *config.Client, dialer net.Dialer, c
 }
 
 func resolveClientID(cliID string) string {
-	if cliID != "" {
-		return cliID
-	}
-
 	type localCfg struct {
 		ClientID string `json:"client_id"`
 	}
 
 	paths := clientConfigPaths()
+	var localID string
 
 	// Чтение: первый файл с непустым client_id.
 	for _, path := range paths {
@@ -331,35 +328,52 @@ func resolveClientID(cliID string) string {
 		}
 		var lc localCfg
 		if err := json.Unmarshal(b, &lc); err == nil && lc.ClientID != "" {
-			return lc.ClientID
+			localID = lc.ClientID
+			break
 		}
 	}
 
-	// Generate 16 bytes hex ID
-	idBytes := make([]byte, 16)
-	if _, err := rand.Read(idBytes); err != nil {
-		log.Fatalf("failed to generate random client ID: %v", err)
-	}
-	newID := hex.EncodeToString(idBytes)
-
-	lc := localCfg{ClientID: newID}
-	b, _ := json.MarshalIndent(lc, "", "  ")
-
-	// Запись: первый доступный для записи путь. На Android каталог рядом с
-	// бинарём (/data/app/.../lib/arm64) read-only - падаем на UserConfigDir,
-	// затем TempDir. Иначе ID не сохраняется и ротируется на каждый запуск,
-	// ломая allowlist (-clients-file) и статистику.
-	for _, path := range paths {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			continue
+	if localID == "" {
+		// Generate 16 bytes hex ID
+		idBytes := make([]byte, 16)
+		if _, err := rand.Read(idBytes); err != nil {
+			log.Fatalf("failed to generate random client ID: %v", err)
 		}
-		if err := os.WriteFile(path, b, 0o600); err == nil { //nolint:gosec // 0o600 для auth-токена
-			return newID
+		localID = hex.EncodeToString(idBytes)
+
+		lc := localCfg{ClientID: localID}
+		b, _ := json.MarshalIndent(lc, "", "  ")
+
+		// Запись: первый доступный для записи путь. На Android каталог рядом с
+		// бинарём (/data/app/.../lib/arm64) read-only - падаем на UserConfigDir,
+		// затем TempDir. Иначе ID не сохраняется и ротируется на каждый запуск,
+		// ломая allowlist (-clients-file) и статистику.
+		persisted := false
+		for _, path := range paths {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				continue
+			}
+			if err := os.WriteFile(path, b, 0o600); err == nil { //nolint:gosec // 0o600 для auth-токена
+				persisted = true
+				break
+			}
+		}
+		if !persisted {
+			log.Printf("warning: failed to persist client ID to any writable path (%v); ID will rotate next launch", paths)
 		}
 	}
-	log.Printf("warning: failed to persist client ID to any writable path (%v); ID will rotate next launch", paths)
 
-	return newID
+	if cliID != "" {
+		// Если cliID задан (например, из freeturn:// ссылки или флага), но не содержит суффикса устройства,
+		// добавляем суффикс локального устройства (#<device_id:8>), чтобы параллельные устройства с одной
+		// подпиской не дрались за одну сессию на UDP-сервере (раздельные WireGuard-сессии).
+		if !strings.ContainsAny(cliID, "#@/") && len(localID) >= 8 {
+			return cliID + "#" + localID[:8]
+		}
+		return cliID
+	}
+
+	return localID
 }
 
 // clientConfigPaths возвращает кандидатов client_config.json в порядке

@@ -546,15 +546,12 @@ func buildProvider(ctx context.Context, cfg *config.Client, dialer net.Dialer, c
 }
 
 func resolveClientID(cliID string) string {
-	if cliID != "" {
-		return cliID
-	}
-
 	type localCfg struct {
 		ClientID string `json:"client_id"`
 	}
 
 	paths := clientConfigPaths()
+	var localID string
 
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
@@ -563,30 +560,44 @@ func resolveClientID(cliID string) string {
 		}
 		var lc localCfg
 		if err := json.Unmarshal(b, &lc); err == nil && lc.ClientID != "" {
-			return lc.ClientID
+			localID = lc.ClientID
+			break
 		}
 	}
 
-	idBytes := make([]byte, 16)
-	if _, err := rand.Read(idBytes); err != nil {
-		log.Fatalf("failed to generate random client ID: %v", err)
-	}
-	newID := hex.EncodeToString(idBytes)
-
-	lc := localCfg{ClientID: newID}
-	b, _ := json.MarshalIndent(lc, "", "  ")
-
-	for _, path := range paths {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			continue
+	if localID == "" {
+		idBytes := make([]byte, 16)
+		if _, err := rand.Read(idBytes); err != nil {
+			log.Fatalf("failed to generate random client ID: %v", err)
 		}
-		if err := os.WriteFile(path, b, 0o600); err == nil {
-			return newID
+		localID = hex.EncodeToString(idBytes)
+
+		lc := localCfg{ClientID: localID}
+		b, _ := json.MarshalIndent(lc, "", "  ")
+
+		persisted := false
+		for _, path := range paths {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				continue
+			}
+			if err := os.WriteFile(path, b, 0o600); err == nil {
+				persisted = true
+				break
+			}
+		}
+		if !persisted {
+			log.Printf("warning: failed to persist client ID to any writable path (%v); ID will rotate next launch", paths)
 		}
 	}
-	log.Printf("warning: failed to persist client ID to any writable path (%v); ID will rotate next launch", paths)
 
-	return newID
+	if cliID != "" {
+		if !strings.ContainsAny(cliID, "#@/") && len(localID) >= 8 {
+			return cliID + "#" + localID[:8]
+		}
+		return cliID
+	}
+
+	return localID
 }
 
 func clientConfigPaths() []string {

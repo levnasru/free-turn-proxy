@@ -146,3 +146,70 @@ func TestClientIDRoundTrip(t *testing.T) {
 		t.Errorf("expected %q, got %q", expectedID, readID)
 	}
 }
+
+func TestBaseClientID(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"client123", "client123"},
+		{"client123#device1", "client123"},
+		{"client123#phone-uuid-456", "client123"},
+		{"client123@pc", "client123"},
+		{"client123/mac", "client123"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := BaseClientID(tc.input); got != tc.want {
+			t.Errorf("BaseClientID(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestClientsDBDeviceSuffix(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "clients.json")
+
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create db: %v", err)
+	}
+
+	if err = db.Add("user-alpha", "Test User Alpha", 2); err != nil {
+		t.Fatalf("Failed to add client: %v", err)
+	}
+
+	// Base ID is authorized
+	if !db.IsAuthorized("user-alpha") {
+		t.Errorf("Expected base user-alpha to be authorized")
+	}
+
+	// Device-suffixed IDs are authorized via BaseClientID
+	if !db.IsAuthorized("user-alpha#phone-1") {
+		t.Errorf("Expected user-alpha#phone-1 to be authorized")
+	}
+	if !db.IsAuthorized("user-alpha#desktop-2") {
+		t.Errorf("Expected user-alpha#desktop-2 to be authorized")
+	}
+	if db.IsAuthorized("user-beta#phone-1") {
+		t.Errorf("Expected user-beta#phone-1 to NOT be authorized")
+	}
+
+	// Quota is tracked against base ID across devices
+	if !db.TryAcquireStream("user-alpha#phone-1") {
+		t.Fatalf("phone-1 acquire stream failed")
+	}
+	if !db.TryAcquireStream("user-alpha#desktop-2") {
+		t.Fatalf("desktop-2 acquire stream failed")
+	}
+	// MaxStreams is 2, third connection from any device should fail
+	if db.TryAcquireStream("user-alpha#tablet-3") {
+		t.Fatalf("expected tablet-3 acquire to be refused due to max_streams=2")
+	}
+
+	// Release from one device allows another to acquire
+	db.ReleaseStream("user-alpha#phone-1")
+	if !db.TryAcquireStream("user-alpha#tablet-3") {
+		t.Fatalf("tablet-3 acquire failed after phone-1 release")
+	}
+}
