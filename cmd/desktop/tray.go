@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/getlantern/systray"
 )

@@ -75,7 +75,7 @@ type packetConn struct {
 func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	bp := bufPool.Get().(*[]byte) //nolint:errcheck // pool New always returns *[]byte
 	buf := *bp
-	need := len(p) + overhead
+	need := c.conn.MaxWire(len(p))
 	if cap(buf) < need {
 		buf = make([]byte, need)
 		*bp = buf

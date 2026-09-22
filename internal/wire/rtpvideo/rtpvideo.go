@@ -159,6 +159,12 @@ func NewConnFromState(s *State, isServer bool) (*Conn, error) {
 	_, _ = rand.Read(startSeq[:])
 	var startTS [4]byte
 	_, _ = rand.Read(startTS[:])
+	var startTCC [2]byte
+	_, _ = rand.Read(startTCC[:])
+	var cb [8]byte
+	if _, err := rand.Read(cb[:]); err != nil {
+		return nil, fmt.Errorf("rtpvideo: rand counter: %w", err)
+	}
 
 	return &Conn{
 		state:     s,
@@ -168,6 +174,8 @@ func NewConnFromState(s *State, isServer bool) (*Conn, error) {
 		isServer:  isServer,
 		seq:       binary.BigEndian.Uint16(startSeq[:]),
 		timestamp: binary.BigEndian.Uint32(startTS[:]),
+		tcc:       binary.BigEndian.Uint16(startTCC[:]),
+		counter:   binary.BigEndian.Uint64(cb[:]),
 	}, nil
 }
 

@@ -166,7 +166,7 @@ type clientSession struct {
 	idleTimer *time.Timer
 	closed    bool
 
-	currentEpoch        uint16
+	currentEpoch        uint32
 	uplinkReseq         *reseq.Resequencer
 	enableReseqDownlink atomic.Bool
 	downlinkSeq         uint32
@@ -180,6 +180,11 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 	case <-slot.done:
 		return // slot is already closed/pruned; ignore late packets
 	default:
+	}
+
+	// Fast path: if slot already recorded this epoch and session currentEpoch matches, no lock needed.
+	if slot.epoch == epoch && uint16(atomic.LoadUint32(&s.currentEpoch)) == epoch {
+		return
 	}
 
 	s.slotsMu.Lock()
@@ -196,18 +201,19 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 	}
 
 	slot.epoch = epoch
-	if s.currentEpoch == 0 {
-		s.currentEpoch = epoch
+	cur := uint16(atomic.LoadUint32(&s.currentEpoch))
+	if cur == 0 {
+		atomic.StoreUint32(&s.currentEpoch, uint32(epoch))
 		s.slotsMu.Unlock()
 		return
 	}
-	if epoch == s.currentEpoch {
+	if epoch == cur {
 		s.slotsMu.Unlock()
 		return
 	}
 
-	oldEpoch := s.currentEpoch
-	s.currentEpoch = epoch
+	oldEpoch := cur
+	atomic.StoreUint32(&s.currentEpoch, uint32(epoch))
 	s.registry.deps.log().Infof("udpserver [%s]: epoch change detected (%d -> %d), pruning stale slots", s.clientID, oldEpoch, epoch)
 
 	if s.uplinkReseq != nil {
@@ -228,6 +234,9 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 		} else {
 			kept = append(kept, sl)
 		}
+	}
+	for i := len(kept); i < len(s.slots); i++ {
+		s.slots[i] = nil
 	}
 	s.slots = kept
 	if s.roundRobin >= len(s.slots) {
@@ -272,6 +281,7 @@ func (s *clientSession) addSlot(conn net.Conn) *streamSlot {
 	// If ungraceful reconnects caused ghost slots to accumulate, prune the oldest
 	for len(s.slots) >= maxClientSlots {
 		oldest := s.slots[0]
+		s.slots[0] = nil
 		s.slots = s.slots[1:]
 		oldest.close()
 		s.registry.deps.log().Debugf("udpserver [%s]: pruned stale stream slot %d (capped at %d)", s.clientID, oldest.id, maxClientSlots)
@@ -304,7 +314,9 @@ func (s *clientSession) removeSlot(slot *streamSlot) {
 
 	for i, cur := range s.slots {
 		if cur == slot {
-			s.slots = append(s.slots[:i], s.slots[i+1:]...)
+			copy(s.slots[i:], s.slots[i+1:])
+			s.slots[len(s.slots)-1] = nil
+			s.slots = s.slots[:len(s.slots)-1]
 			if s.roundRobin >= len(s.slots) {
 				s.roundRobin = 0
 				s.burstCount = 0
@@ -441,9 +453,7 @@ func (s *clientSession) readBackendLoop() {
 
 		if s.enableReseqDownlink.Load() {
 			seq := atomic.AddUint32(&s.downlinkSeq, 1)
-			s.slotsMu.Lock()
-			ep := s.currentEpoch
-			s.slotsMu.Unlock()
+			ep := uint16(atomic.LoadUint32(&s.currentEpoch))
 			framed := reseq.Wrap(nil, buf[:n], seq, ep)
 			s.route(framed)
 		} else {
@@ -461,7 +471,7 @@ func (s *clientSession) route(data []byte) {
 		return
 	}
 
-	curEpoch := s.currentEpoch
+	curEpoch := uint16(atomic.LoadUint32(&s.currentEpoch))
 	candidates := make([]*streamSlot, 0, n)
 	if curEpoch != 0 {
 		for _, sl := range s.slots {
@@ -510,6 +520,11 @@ func (s *clientSession) route(data []byte) {
 	for i := 0; i < numCandidates; i++ {
 		idx := (startIdx + i) % numCandidates
 		target := slots[idx]
+		select {
+		case <-target.done:
+			continue
+		default:
+		}
 		select {
 		case <-target.done:
 			continue

@@ -142,7 +142,7 @@ func Reorder(ctx context.Context, dst net.Conn, recv <-chan Frame, h ReorderHook
 	var finSeq *uint64
 
 	for {
-		if finSeq != nil && expect == *finSeq {
+		if finSeq != nil && expect >= *finSeq {
 			CloseWrite(dst, h.OnCloseWrite)
 			return expect
 		}
@@ -161,7 +161,7 @@ func Reorder(ctx context.Context, dst net.Conn, recv <-chan Frame, h ReorderHook
 				if _, exists := pending[f.Seq]; exists {
 					continue // already queued; ignore duplicate
 				}
-				if len(pending) >= PendingCap {
+				if f.Seq != expect && len(pending) >= PendingCap {
 					if h.OnOverflow != nil {
 						h.OnOverflow(len(pending))
 					}

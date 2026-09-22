@@ -530,6 +530,7 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 			}
 			c.mu.Lock()
 			c.isLegacy = true
+			c.isVideo = false
 			c.mu.Unlock()
 			return plain, nil
 		}
@@ -556,6 +557,7 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	}
 	c.mu.Lock()
 	c.isLegacy = false
+	c.isVideo = false
 	c.mu.Unlock()
 	return sealed[:realLen], nil
 }

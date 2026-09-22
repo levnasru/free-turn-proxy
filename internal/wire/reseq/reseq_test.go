@@ -194,6 +194,9 @@ func TestResequencerStaleDuplicatesIgnored(t *testing.T) {
 	if len(delivered) != 3 {
 		t.Fatalf("expected 3 delivered, got %d (%v)", len(delivered), delivered)
 	}
+	if delivered[0] != 1 || delivered[1] != 2 || delivered[2] != 3 {
+		t.Fatalf("expected [1, 2, 3], got %v", delivered)
+	}
 }
 
 func TestResequencerSequenceReset(t *testing.T) {

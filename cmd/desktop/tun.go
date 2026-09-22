@@ -151,6 +151,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 			cancel()
 		case <-ctx.Done():
 			reportModeExit(ctx, "client", nil)
+			<-clientDone
 		}
 		return
 	}

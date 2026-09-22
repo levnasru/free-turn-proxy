@@ -56,7 +56,7 @@ func (s *Shaper) Wait() {
 	wait := s.interval - time.Since(s.lastSend)
 	if wait > 0 {
 		if jitter := time.Duration(float64(s.interval) * jitterPct); jitter > 0 {
-			wait += time.Duration(randx.Intn(int(jitter)*2+1)) - jitter
+			wait += time.Duration(randx.Int63n(int64(jitter)*2+1)) - jitter
 		}
 	}
 	s.lastSend = time.Now().Add(max(wait, 0))

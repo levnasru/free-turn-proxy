@@ -109,12 +109,12 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 
 	diff := int32(seq - r.baseSeq)
 
-	// Case 1: Sequence reset or backwards jump.
-	// If the sequence restarted backwards from 1 (diff < 0) or jumped backwards beyond the window,
-	// the sender has restarted. Re-synchronize baseSeq immediately.
-	// Note: if seq == 1 was recorded as a timed-out gap from the current session, do not reset;
-	// it will be delivered as a late packet in the branch below.
-	if (seq == 1 && diff < 0 && !(r.timedOutOcc[1] && r.timedOut[1] == 1)) || diff < -WindowSize {
+	// Case 1: Sequence reset.
+	// If the sequence restarted from 1 while baseSeq was well advanced (diff < -16),
+	// the sender has genuinely restarted without an epoch bump. Re-synchronize baseSeq immediately.
+	// Note: early duplicate of packet 1 (diff >= -16, e.g. baseSeq is 2 or 3) or late packet from
+	// a timed-out gap must NOT trigger a reset; they are handled in the diff < 0 branch below.
+	if seq == 1 && diff < -16 && !(r.timedOutOcc[1] && r.timedOut[1] == 1) {
 		r.drainAllLocked()
 		r.baseSeq = seq
 		diff = 0
@@ -129,7 +129,7 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 			latePkt = make([]byte, len(payload))
 			copy(latePkt, payload)
 		} else {
-			// True duplicate of an already-delivered packet.
+			// True duplicate of an already-delivered packet or ancient packet beyond window.
 			r.stats.StaleDropped++
 		}
 		r.mu.Unlock()
@@ -198,6 +198,9 @@ func (r *Resequencer) drainContiguousLocked() [][]byte {
 		r.stats.Delivered++
 		s.occupied = false
 		s.receivedAt = time.Time{}
+		s.payload = s.payload[:0]
+		r.timedOutOcc[idx] = false
+		r.timedOut[idx] = 0
 		r.pendingCount--
 		r.baseSeq++
 	}
@@ -295,6 +298,7 @@ func (r *Resequencer) drainAllLocked() {
 	for i := range r.slots {
 		r.slots[i].occupied = false
 		r.slots[i].receivedAt = time.Time{}
+		r.slots[i].payload = r.slots[i].payload[:0]
 		r.timedOut[i] = 0
 		r.timedOutOcc[i] = false
 	}

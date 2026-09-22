@@ -147,6 +147,7 @@ func (q *Queue) dodequeue(now time.Time) dequeueResult {
 	}
 
 	it := q.buf[0]
+	q.buf[0] = item{}
 	q.buf = q.buf[1:]
 
 	sojourn := now.Sub(it.enqueued)
@@ -275,6 +276,10 @@ func (q *Queue) Close() {
 		return
 	}
 	q.closed = true
+	for i := range q.buf {
+		q.buf[i] = item{}
+	}
+	q.buf = nil
 	q.cond.Broadcast()
 }
 

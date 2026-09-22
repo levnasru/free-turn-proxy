@@ -26,6 +26,18 @@ func IntN(n int) int {
 // Intn - алиас IntN для совместимости с math/rand.
 func Intn(n int) int { return IntN(n) }
 
+// Int63n возвращает равномерное случайное число из [0, n) для int64. Для n <= 0 возвращает 0.
+func Int63n(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(n))
+	if err != nil {
+		return 0
+	}
+	return v.Int64()
+}
+
 // Hex возвращает n случайных байт в hex (строка длиной 2n).
 func Hex(n int) string {
 	b := make([]byte, n)
