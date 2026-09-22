@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.6.2] (2026-09-22)
+
+### Features
+
+* **rebrand:** rename client, desktop, and server interfaces/tooltips to LFT.
+* **udpserver:** increase stream slot ceiling to 256 (`maxClientSlots = 256`) to support high-concurrency multi-account pools.
+* **desktop:** add `-mtu` flag supporting custom MTU (e.g. 1280 for wire broadband vs 1050 for mobile).
+
+### Bug Fixes
+
+* **reseq:** fix false sequence reset on natural wrap-around (`seq == 1`) using `diff < -16` threshold, drop ancient packets as `StaleDropped`, and zero drained buffer memory.
+* **bondframe:** fix pending overflow check and guard against early FIN reordering.
+* **udpserver:** atomic epoch check fast-paths, pre-select route check, and slice element zeroing on pruning to prevent memory leaks.
+* **wire:** randomize RTP video sequence counter, fix `isVideo` unwrap audio state leaks, and resolve 32-bit PRNG overflow.
+* **provider:** protect manual CAPTCHA solver port with mutex to prevent address collisions.
+
 ## [2.0.2](https://github.com/samosvalishe/free-turn-proxy/compare/v2.0.1...v2.0.2) (2026-07-30)
 
 

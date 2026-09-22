@@ -115,9 +115,9 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 
 	if tunType == "wg" {
 		go func() { clientDone <- RunClientWG(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
-		fmt.Println("Поднимаю нативный WireGuard туннель VK-TURN (UDP)...")
+		fmt.Println("Поднимаю нативный WireGuard туннель LFT (UDP)...")
 		if err := waitForVKTurnUDPReady(ctx, vkTurnClientListenPort, clientListenTimeout); err != nil {
-			fmt.Fprintln(os.Stderr, "Туннель VK-TURN не поднялся:", err)
+			fmt.Fprintln(os.Stderr, "Туннель LFT не поднялся:", err)
 			cancel()
 			<-clientDone
 			return
@@ -163,7 +163,7 @@ func runVKTurnTunMode(ctx context.Context, cancel context.CancelFunc, cfg *Deskt
 	}
 
 	go func() { clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr, "-bind-iface", iface) }()
-	fmt.Println("Поднимаю Xray туннель VK-TURN (TCP)...")
+	fmt.Println("Поднимаю Xray туннель LFT (TCP)...")
 	if err := waitForListening(ctx, fmt.Sprintf("127.0.0.1:%d", vkTurnClientListenPort), clientListenTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, "Туннель не поднялся:", err)
 		cancel()

@@ -99,7 +99,7 @@ var configPathFlag = flag.String("config", "",
 	"путь к файлу config.json (используется при повышении прав или ручном запуске)")
 
 var mtuFlag = flag.Int("mtu", 0,
-	"MTU для WireGuard / TUN туннеля (0 — авто: 1050 для VK-TURN солянки / 1420 для Reality)")
+	"MTU для WireGuard / TUN туннеля (0 — авто: 1050 для LFT солянки / 1420 для Reality)")
 
 var debugFlag = flag.Bool("debug", false,
 	"включить подробную отладку (verbose debug log)")
@@ -484,7 +484,7 @@ func runVKTurnMode(ctx context.Context, cancel context.CancelFunc, cfg *DesktopC
 		clientDone <- RunClient(ctx, clientBin, cfg, stdout, stderr)
 	}()
 
-	fmt.Println("Поднимаю туннель VK-TURN...")
+	fmt.Println("Поднимаю туннель LFT...")
 	// clientListenTimeout покрывает реальный бюджет первой TURN-сессии:
 	// hub.go httpTimeout=15s (получение кредов) + dtlsdial HandshakeTimeout=30s
 	// для tcp+bond (cmd/client/main.go) — до этого client вообще не открывает

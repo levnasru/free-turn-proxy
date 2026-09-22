@@ -100,7 +100,7 @@ func main() {
 	cfg.ClientID = resolveClientID(cfg.ClientID)
 
 	logger := logx.New(cfg.Log.Debug)
-	logger.Infof("Free Turn Proxy client version=%s", version)
+	logger.Infof("LFT client version=%s", version)
 	logger.Infof("Client ID: %s", cfg.ClientID)
 	dnsdial.SetLogger(logger)
 	signalChan := make(chan os.Signal, 1)

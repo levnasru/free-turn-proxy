@@ -34,7 +34,7 @@ func ensureBypassFileExists() (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	template := `# VK-TURN: Сайты и IP-адреса для прямого доступа (мимо туннеля / direct)
+	template := `# LFT: Сайты и IP-адреса для прямого доступа (мимо туннеля / direct)
 # Добавляйте по одному на строку. Поддерживаются домены, IP и CIDR-подсети.
 #
 # Примеры доменов:
@@ -253,7 +253,7 @@ func clearUserBypassList() error {
 	if err != nil {
 		return err
 	}
-	template := `# VK-TURN: Сайты и IP-адреса для прямого доступа (мимо туннеля / direct)
+	template := `# LFT: Сайты и IP-адреса для прямого доступа (мимо туннеля / direct)
 # Добавляйте по одному на строку. Поддерживаются домены, IP и CIDR-подсети.
 #
 # Примеры доменов:

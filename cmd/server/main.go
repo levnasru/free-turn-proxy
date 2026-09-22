@@ -45,7 +45,7 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	logger := logx.New(cfg.Log.Debug)
-	logger.Infof("Free Turn Proxy server version=%s", version)
+	logger.Infof("LFT server version=%s", version)
 
 	if cfg.Obf.GenKey {
 		key, gerr := rtpopus.GenKeyHex()

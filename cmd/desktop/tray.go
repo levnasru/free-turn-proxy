@@ -34,8 +34,8 @@ func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel strin
 
 	trayOnce.Do(func() {
 		go systray.Run(func() {
-			systray.SetTitle("VK-TURN")
-			systray.SetTooltip("VK-TURN: " + statusLabel)
+			systray.SetTitle("LFT")
+			systray.SetTooltip("LFT: " + statusLabel)
 
 			mStatusItem = systray.AddMenuItem(statusLabel, "")
 			mStatusItem.Disable()
@@ -43,7 +43,7 @@ func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel strin
 			mRestore := restoreMenuItem() // nil on non-Windows
 			mBypass := systray.AddMenuItem("Сайты мимо туннеля (Whitelist)...", "Редактировать список доменов и IP для прямого доступа")
 			mStopItem = systray.AddMenuItem("Отключить", "Остановить туннель")
-			mQuit := systray.AddMenuItem("Выход", "Закрыть VK-TURN")
+			mQuit := systray.AddMenuItem("Выход", "Закрыть LFT")
 
 			hideConsoleOnConnect()
 
@@ -93,7 +93,7 @@ func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel strin
 	trayMu.Lock()
 	if mStatusItem != nil {
 		mStatusItem.SetTitle(statusLabel)
-		systray.SetTooltip("VK-TURN: " + statusLabel)
+		systray.SetTooltip("LFT: " + statusLabel)
 	}
 	if mStopItem != nil {
 		mStopItem.Enable()
@@ -107,7 +107,7 @@ func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel strin
 		trayMu.Lock()
 		if mStatusItem != nil {
 			mStatusItem.SetTitle("Отключено")
-			systray.SetTooltip("VK-TURN: Отключено")
+			systray.SetTooltip("LFT: Отключено")
 		}
 		if mStopItem != nil {
 			mStopItem.Disable()
