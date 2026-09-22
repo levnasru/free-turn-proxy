@@ -68,6 +68,10 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
+		if errors.Is(err, config.ErrVersion) {
+			fmt.Printf("LFT %s\n", version)
+			os.Exit(0)
+		}
 		// логгер ещё не создан - единственный fatal до его инициализации.
 		log.Fatalf("%v", err)
 	}
@@ -104,7 +108,7 @@ func main() {
 	logger.Infof("Client ID: %s", cfg.ClientID)
 	dnsdial.SetLogger(logger)
 	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(signalChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	go func() {
 		<-signalChan
 		logger.Infof("Terminating...")

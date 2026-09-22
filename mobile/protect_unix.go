@@ -37,9 +37,8 @@ func SendFD(protectPath string, fd int) error {
 	err = sysconn.Control(func(ctrlFd uintptr) {
 		rights := syscall.UnixRights(fd)
 		// Send a dummy byte along with the FD
-		err = syscall.Sendmsg(int(ctrlFd), []byte("p"), rights, nil, 0)
-		if err != nil {
-			opErr = err
+		if sendErr := syscall.Sendmsg(int(ctrlFd), []byte("p"), rights, nil, 0); sendErr != nil {
+			opErr = sendErr
 		}
 	})
 	if err != nil {

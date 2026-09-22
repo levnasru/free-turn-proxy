@@ -445,3 +445,58 @@ func TestParseServer_ProxyMode(t *testing.T) {
 		t.Errorf("Proxy.Mode = %q, want tcpfwd", s.Proxy.Mode)
 	}
 }
+
+func TestParseClient_VersionFlags(t *testing.T) {
+	_, err := ParseClient([]string{"-v"}, io.Discard)
+	if !errors.Is(err, ErrVersion) {
+		t.Errorf("expected ErrVersion for -v, got %v", err)
+	}
+	_, err = ParseClient([]string{"-version"}, io.Discard)
+	if !errors.Is(err, ErrVersion) {
+		t.Errorf("expected ErrVersion for -version, got %v", err)
+	}
+}
+
+func TestParseClient_PeerDefaultPort(t *testing.T) {
+	args := []string{
+		"-peer", "89.124.71.77",
+		"-link", "https://vk.ru/call/join/abcdef",
+	}
+	c, err := ParseClient(args, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if c.Proxy.Peer != "89.124.71.77:56000" {
+		t.Errorf("expected peer to have default port :56000, got %q", c.Proxy.Peer)
+	}
+}
+
+func TestParseClient_TurnHostPortSplit(t *testing.T) {
+	args := []string{
+		"-peer", "89.124.71.77:56000",
+		"-link", "https://vk.ru/call/join/abcdef",
+		"-turn", "192.168.1.1:3478",
+	}
+	c, err := ParseClient(args, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if c.TURN.Host != "192.168.1.1" || c.TURN.Port != "3478" {
+		t.Errorf("expected Host=192.168.1.1 and Port=3478, got Host=%q Port=%q", c.TURN.Host, c.TURN.Port)
+	}
+}
+
+func TestParseClient_LinkCommaSplit(t *testing.T) {
+	args := []string{
+		"-peer", "89.124.71.77:56000",
+		"-link", "https://vk.ru/call/join/link1,https://vk.ru/call/join/link2",
+	}
+	c, err := ParseClient(args, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(c.VK.Links) != 2 || c.VK.Links[0] != "link1" || c.VK.Links[1] != "link2" {
+		t.Errorf("expected [link1, link2], got %v", c.VK.Links)
+	}
+}
+

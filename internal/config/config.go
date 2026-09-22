@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +22,8 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/uri"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
 )
+
+var ErrVersion = errors.New("version requested")
 
 const (
 	dnsModePlain           = "plain"
@@ -216,6 +219,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		fs.SetOutput(errOut)
 	}
 
+	showVerShort := fs.Bool("v", false, "показать версию и выйти")
+	showVerLong := fs.Bool("version", false, "показать версию и выйти")
 	turn := fs.String("turn", "", "IP TURN-сервера; override creds провайдера")
 	port := fs.String("port", "", "порт TURN-сервера; override creds провайдера")
 	listen := fs.String("listen", "127.0.0.1:9000", "локальный ip:port для WireGuard/Xray клиента")
@@ -250,11 +255,25 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	if *showVerShort || *showVerLong {
+		return nil, ErrVersion
+	}
+
+	turnHost := *turn
+	turnPort := *port
+	if turnHost != "" {
+		if h, p, err := net.SplitHostPort(turnHost); err == nil {
+			turnHost = h
+			if turnPort == "" {
+				turnPort = p
+			}
+		}
+	}
 
 	c := &Client{
 		TURN: TURNOpts{
-			Host:         *turn,
-			Port:         *port,
+			Host:         turnHost,
+			Port:         turnPort,
 			TransportUDP: *transport == "udp",
 			N:            *n,
 			BatchSize:    *batch,
@@ -385,6 +404,9 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	if c.Proxy.Peer == "" {
 		return nil, errors.New("need peer address")
 	}
+	if !strings.Contains(c.Proxy.Peer, ":") {
+		c.Proxy.Peer = net.JoinHostPort(c.Proxy.Peer, "56000")
+	}
 	switch c.Provider.Name {
 	case ProviderVK:
 		if *links == "" && *link == "" {
@@ -404,7 +426,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		rawLinks := strings.Split(*links, ",")
 		if len(rawLinks) == 1 && rawLinks[0] == "" {
 			// -links не задан, используем -link (backward compat)
-			rawLinks = []string{*link}
+			rawLinks = strings.Split(*link, ",")
 		}
 		for _, raw := range rawLinks {
 			raw = strings.TrimSpace(raw)
