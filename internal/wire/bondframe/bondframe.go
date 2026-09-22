@@ -155,6 +155,12 @@ func Reorder(ctx context.Context, dst net.Conn, recv <-chan Frame, h ReorderHook
 			}
 			switch f.Type {
 			case FrameData:
+				if f.Seq < expect {
+					continue // already delivered; ignore duplicate
+				}
+				if _, exists := pending[f.Seq]; exists {
+					continue // already queued; ignore duplicate
+				}
 				if len(pending) >= PendingCap {
 					if h.OnOverflow != nil {
 						h.OnOverflow(len(pending))

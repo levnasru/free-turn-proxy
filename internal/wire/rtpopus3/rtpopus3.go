@@ -501,6 +501,9 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rtpopus3:video AEAD open: %w", err)
 		}
+		if len(sealed) < markerLen {
+			return nil, errors.New("rtpopus3:video payload shorter than length marker")
+		}
 		realLen := int(binary.BigEndian.Uint16(sealed[len(sealed)-markerLen:]))
 		if realLen > len(sealed)-markerLen {
 			return nil, errors.New("rtpopus3:video length marker exceeds payload")
@@ -543,6 +546,9 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	sealed, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
 	if err != nil {
 		return nil, fmt.Errorf("rtpopus3:AEAD open: %w", err)
+	}
+	if len(sealed) < markerLen {
+		return nil, errors.New("rtpopus3:payload shorter than length marker")
 	}
 	realLen := int(binary.BigEndian.Uint16(sealed[len(sealed)-markerLen:]))
 	if realLen > len(sealed)-markerLen {

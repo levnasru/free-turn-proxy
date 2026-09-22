@@ -3,6 +3,7 @@
 package mobile
 
 import (
+	"errors"
 	"net"
 	"syscall"
 	"time"
@@ -52,6 +53,9 @@ func SendFD(protectPath string, fd int) error {
 	ackBuf := make([]byte, 1)
 	if _, err := conn.Read(ackBuf); err != nil {
 		return err
+	}
+	if ackBuf[0] != 1 {
+		return errors.New("protect daemon returned negative ack")
 	}
 	return nil
 }

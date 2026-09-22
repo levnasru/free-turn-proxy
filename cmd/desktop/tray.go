@@ -74,7 +74,12 @@ func startTray(ctx context.Context, cancel context.CancelFunc, statusLabel strin
 							c()
 						}
 						restoreConsole()
-						os.Exit(0)
+						systray.Quit()
+						go func() {
+							time.Sleep(3 * time.Second)
+							os.Exit(0)
+						}()
+						return
 					}
 				}
 			}()

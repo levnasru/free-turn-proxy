@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"errors"
 	"syscall"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/netctl"
@@ -25,6 +26,14 @@ func SetProtect(p Protector) {
 		return
 	}
 	netctl.SetControl(func(_, _ string, c syscall.RawConn) error {
-		return c.Control(func(fd uintptr) { p.Protect(int(fd)) })
+		var ok bool
+		err := c.Control(func(fd uintptr) { ok = p.Protect(int(fd)) })
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("socket protect failed")
+		}
+		return nil
 	})
 }

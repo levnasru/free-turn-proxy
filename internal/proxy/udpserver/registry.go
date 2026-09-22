@@ -176,7 +176,25 @@ func (s *clientSession) handleEpoch(slot *streamSlot, epoch uint16) {
 	if epoch == 0 {
 		return
 	}
+	select {
+	case <-slot.done:
+		return // slot is already closed/pruned; ignore late packets
+	default:
+	}
+
 	s.slotsMu.Lock()
+	found := false
+	for _, sl := range s.slots {
+		if sl == slot {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.slotsMu.Unlock()
+		return
+	}
+
 	slot.epoch = epoch
 	if s.currentEpoch == 0 {
 		s.currentEpoch = epoch

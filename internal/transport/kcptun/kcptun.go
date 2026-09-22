@@ -27,6 +27,8 @@ type FEC struct {
 }
 
 // DefaultProfile - исторический balanced-профиль, поставляемый с прокси.
+// MTU установлен в 1000 для строгого соответствия DefaultDTLSMTU (1050),
+// исключая DTLS-фрагментацию и дропы на сотовых сетях (MTS IPv6 MTU 1300).
 func DefaultProfile() Profile {
 	return Profile{
 		NoDelay:    1,
@@ -35,7 +37,7 @@ func DefaultProfile() Profile {
 		NC:         1,
 		SndWnd:     512,
 		RcvWnd:     512,
-		MTU:        1200,
+		MTU:        1000,
 		ACKNoDelay: true,
 	}
 }

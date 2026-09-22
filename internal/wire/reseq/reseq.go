@@ -112,8 +112,9 @@ func (r *Resequencer) Push(seq uint32, payload []byte) {
 	// Case 1: Sequence reset or backwards jump.
 	// If the sequence restarted backwards from 1 (diff < 0) or jumped backwards beyond the window,
 	// the sender has restarted. Re-synchronize baseSeq immediately.
-	// Note: natural forward sequence wrap-around has diff >= 0 and is not a reset.
-	if (seq == 1 && diff < 0) || diff < -WindowSize {
+	// Note: if seq == 1 was recorded as a timed-out gap from the current session, do not reset;
+	// it will be delivered as a late packet in the branch below.
+	if (seq == 1 && diff < 0 && !(r.timedOutOcc[1] && r.timedOut[1] == 1)) || diff < -WindowSize {
 		r.drainAllLocked()
 		r.baseSeq = seq
 		diff = 0

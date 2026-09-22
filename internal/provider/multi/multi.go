@@ -56,13 +56,15 @@ func (m *Provider) IsAuthError(err error) bool {
 }
 
 func (m *Provider) HandleAuthError(streamID int) bool {
-	p, innerID := m.providerFor(streamID)
-	return p.HandleAuthError(innerID)
+	idx := (streamID - 1) % m.n
+	innerID := ((streamID - 1) / m.n) + 1
+	return m.providers[idx].HandleAuthError(innerID)
 }
 
 func (m *Provider) ResetErrors(streamID int) {
-	p, innerID := m.providerFor(streamID)
-	p.ResetErrors(innerID)
+	idx := (streamID - 1) % m.n
+	innerID := ((streamID - 1) / m.n) + 1
+	m.providers[idx].ResetErrors(innerID)
 }
 
 // BackoffUntilUnix - максимум среди провайдеров (один в блокировке -> пауза для всех).

@@ -404,3 +404,37 @@ func TestResequencerLateZeroPacket(t *testing.T) {
 		t.Errorf("expected payload 0 to be delivered to callback, got %v", delivered)
 	}
 }
+
+func TestResequencerLatePacketOneDoesNotReset(t *testing.T) {
+	var delivered []int
+	var mu sync.Mutex
+	r := New(20*time.Millisecond, func(payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, int(payload[0]))
+	})
+	defer r.Close()
+
+	// Initial packet 1 is delayed in transit. Packet 2 arrives first!
+	r.Push(2, []byte{2})
+
+	// Wait for dwell timeout to expire on missing packet 1
+	time.Sleep(35 * time.Millisecond)
+
+	// After timeout, packet 2 should have been delivered, and baseSeq advanced
+	// Now late packet 1 arrives! It must be delivered as late packet WITHOUT resetting baseSeq
+	r.Push(1, []byte{1})
+
+	// Packet 3 arrives
+	r.Push(3, []byte{3})
+
+	mu.Lock()
+	defer mu.Unlock()
+	st := r.Stats()
+	if st.LateDelivered != 1 {
+		t.Errorf("expected 1 LateDelivered for late seq=1, got %d", st.LateDelivered)
+	}
+	if len(delivered) != 3 {
+		t.Fatalf("expected 3 delivered packets, got %d: %v", len(delivered), delivered)
+	}
+}

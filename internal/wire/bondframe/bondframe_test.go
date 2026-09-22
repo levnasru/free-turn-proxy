@@ -2,8 +2,10 @@ package bondframe
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
+	"net"
 	"testing"
 )
 
@@ -124,5 +126,57 @@ func TestReadHelloAfterMagic_EOF(t *testing.T) {
 	copy(magic[:], Magic)
 	if _, err := ReadHelloAfterMagic(bytes.NewReader(nil), magic); err == nil || err == io.ErrShortBuffer {
 		t.Fatalf("expected EOF-like error, got %v", err)
+	}
+}
+
+func TestReorder_DuplicateFramesDropped(t *testing.T) {
+	t.Parallel()
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	recv := make(chan Frame, 10)
+	var overflowCalled bool
+	hooks := ReorderHooks{
+		OnOverflow: func(int) {
+			overflowCalled = true
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, err := c2.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	done := make(chan uint64)
+	go func() {
+		done <- Reorder(ctx, c1, recv, hooks)
+	}()
+
+	// Send Frame 0
+	recv <- Frame{Type: FrameData, Seq: 0, Data: []byte("pkt0")}
+	// Send duplicate of Frame 0 (Seq < expect)
+	recv <- Frame{Type: FrameData, Seq: 0, Data: []byte("pkt0-dup")}
+	// Send Frame 1
+	recv <- Frame{Type: FrameData, Seq: 1, Data: []byte("pkt1")}
+	// Send duplicate of Frame 1
+	recv <- Frame{Type: FrameData, Seq: 1, Data: []byte("pkt1-dup")}
+	// Send FIN
+	recv <- Frame{Type: FrameFIN, Seq: 2}
+
+	delivered := <-done
+	if overflowCalled {
+		t.Fatalf("unexpected overflow on duplicates")
+	}
+	if delivered != 2 {
+		t.Fatalf("expected 2 delivered chunks, got %d", delivered)
 	}
 }
