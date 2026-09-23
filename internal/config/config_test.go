@@ -459,21 +459,21 @@ func TestParseClient_VersionFlags(t *testing.T) {
 
 func TestParseClient_PeerDefaultPort(t *testing.T) {
 	args := []string{
-		"-peer", "89.124.71.77",
+		"-peer", "panelproxy.levnas.ru",
 		"-link", "https://vk.ru/call/join/abcdef",
 	}
 	c, err := ParseClient(args, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if c.Proxy.Peer != "89.124.71.77:56000" {
+	if c.Proxy.Peer != "panelproxy.levnas.ru:56000" {
 		t.Errorf("expected peer to have default port :56000, got %q", c.Proxy.Peer)
 	}
 }
 
 func TestParseClient_TurnHostPortSplit(t *testing.T) {
 	args := []string{
-		"-peer", "89.124.71.77:56000",
+		"-peer", "panelproxy.levnas.ru:56000",
 		"-link", "https://vk.ru/call/join/abcdef",
 		"-turn", "192.168.1.1:3478",
 	}
@@ -488,7 +488,7 @@ func TestParseClient_TurnHostPortSplit(t *testing.T) {
 
 func TestParseClient_LinkCommaSplit(t *testing.T) {
 	args := []string{
-		"-peer", "89.124.71.77:56000",
+		"-peer", "panelproxy.levnas.ru:56000",
 		"-link", "https://vk.ru/call/join/link1,https://vk.ru/call/join/link2",
 	}
 	c, err := ParseClient(args, io.Discard)

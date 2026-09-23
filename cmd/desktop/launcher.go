@@ -105,7 +105,7 @@ func buildClientWGArgs(cfg *DesktopConfig) (args, env []string) {
 		if err == nil {
 			peer = net.JoinHostPort(host, "56005")
 		} else {
-			peer = "89.124.71.77:56005"
+			peer = "panelproxy.levnas.ru:56005"
 		}
 	}
 	args = []string{

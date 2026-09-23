@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.3] (2026-09-23)
+
+### Bug Fixes
+
+* **desktop:** switch default fallback peer from blocked IP to `panelproxy.levnas.ru:56005`.
+* **tests:** update test fixtures to use `panelproxy.levnas.ru`.
+
 ## [2.6.2] (2026-09-22)
 
 ### Features
